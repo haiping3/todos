@@ -1,0 +1,97 @@
+# Chrome Extension Project - Cursor Rules
+
+## Author
+haiping.yu@zoom.us
+
+## Quick Reference
+
+This project is a Chrome Extension built with:
+- **Manifest V3** (service workers, not background pages)
+- **TypeScript** (strict mode enabled)
+- **React 18** (functional components, hooks)
+- **Tailwind CSS** (utility-first styling)
+- **Supabase** (backend: auth, database, storage, realtime)
+- **Vite** (fast build tool)
+- **pnpm** (package manager)
+
+## Core Principles
+
+1. **Security First**: Follow `.cursor/rules/security-security-baseline.mdc` for all code
+2. **Type Safety**: Use strict TypeScript, avoid `any`, prefer `unknown` with type guards
+3. **Chrome API Aware**: Service workers can terminate; use `chrome.storage` not globals
+4. **Accessible UI**: WCAG 2.1 AA compliance, keyboard navigation, proper ARIA labels
+5. **Clean Code**: Small, focused functions; meaningful names; comprehensive comments
+
+## Development Workflow
+
+When implementing features:
+1. Understand the requirement fully before coding
+2. Create or update types first
+3. Implement with proper error handling
+4. Add tests for new functionality
+5. Consider security implications
+
+## File Locations
+
+| What | Where |
+|------|-------|
+| Popup UI | `src/popup/` |
+| Content Scripts | `src/content/` |
+| Service Worker | `src/background/` |
+| Shared Components | `src/components/` |
+| Custom Hooks | `src/hooks/` |
+| Utilities | `src/utils/` |
+| Types | `src/types/` |
+| Supabase Client | `src/lib/supabase.ts` |
+| Supabase Migrations | `supabase/migrations/` |
+| Edge Functions | `supabase/functions/` |
+
+## Code Style Quick Guide
+
+```typescript
+// Component: PascalCase, with JSDoc
+/**
+ * Component description
+ * @author haiping.yu@zoom.us
+ */
+export const MyComponent: React.FC<Props> = ({ prop }) => { ... };
+
+// Hook: camelCase with 'use' prefix
+export function useMyHook() { ... }
+
+// Utility: camelCase
+export function myUtility() { ... }
+
+// Constant: SCREAMING_SNAKE_CASE
+export const MY_CONSTANT = 'value';
+```
+
+## Important Reminders
+
+- Always check `chrome.runtime.lastError` after Chrome API calls
+- Use `chrome.storage` for persistence (service workers have no persistent state)
+- Validate all external input before processing
+- Keep popup dimensions reasonable (max 800x600px)
+- Test in both light and dark modes
+
+## Detailed Rules
+
+See `.cursor/rules/` directory for comprehensive guidelines:
+
+**Project & Code:**
+- `project-overview.mdc` - Project structure and tech stack
+- `chrome-extension.mdc` - Chrome extension specifics
+- `code-style.mdc` - Coding standards
+- `ui-design.mdc` - Design guidelines
+- `testing.mdc` - Testing patterns
+- `security-security-baseline.mdc` - Security requirements
+
+**Supabase (based on [official rules](https://supabase.com/ui/docs/ai-editors-rules/prompts)):**
+- `supabase-client.mdc` - Client setup and integration for Chrome extension
+- `supabase-db-functions.mdc` - Database functions best practices
+- `supabase-migrations.mdc` - Migration file patterns
+- `supabase-rls-policies.mdc` - Row Level Security policies
+- `supabase-sql-style.mdc` - PostgreSQL SQL style guide
+- `supabase-realtime.mdc` - Realtime subscriptions and presence
+- `supabase-edge-functions.mdc` - Edge Functions development
+

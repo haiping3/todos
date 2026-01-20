@@ -1,0 +1,153 @@
+---
+description: Guidelines for creating Supabase database migrations
+globs: ["supabase/migrations/**/*.sql"]
+alwaysApply: false
+---
+
+# Database: Create Migrations
+
+You're a Supabase Postgres expert in writing database migrations. Generate **high-quality PostgreSQL migrations** that adhere to the following best practices:
+
+## General Guidelines
+
+1. **Use Descriptive Migration Names:**
+   - Name migrations clearly: `YYYYMMDDHHMMSS_descriptive_name.sql`
+   - Example: `20240115120000_create_users_table.sql`
+
+2. **Always Include Both Up and Down Logic:**
+   - Even if Supabase doesn't require separate files, comment the rollback SQL
+
+3. **Use Transactions:**
+   - Wrap DDL statements in transactions when possible
+   - Be aware that some operations (like `CREATE INDEX CONCURRENTLY`) cannot be in a transaction
+
+## Table Creation Best Practices
+
+### Standard Table Template
+
+```sql
+-- Create table with standard columns
+create table if not exists public.table_name (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz default now() not null,
+  updated_at timestamptz default now() not null,
+  -- Add your columns here
+  user_id uuid references auth.users(id) on delete cascade not null
+);
+
+-- Enable RLS
+alter table public.table_name enable row level security;
+
+-- Create updated_at trigger
+create trigger update_table_name_updated_at
+  before update on public.table_name
+  for each row
+  execute function public.update_updated_at_column();
+
+-- Add indexes
+create index idx_table_name_user_id on public.table_name(user_id);
+
+-- Add comments
+comment on table public.table_name is 'Description of the table';
+```
+
+### Common Column Patterns
+
+```sql
+-- UUID primary key
+id uuid primary key default gen_random_uuid()
+
+-- Timestamps
+created_at timestamptz default now() not null
+updated_at timestamptz default now() not null
+
+-- Soft delete
+deleted_at timestamptz
+
+-- Foreign key to auth.users
+user_id uuid references auth.users(id) on delete cascade not null
+
+-- Status enum
+status text check (status in ('pending', 'active', 'completed')) default 'pending'
+
+-- JSONB for flexible data
+metadata jsonb default '{}'::jsonb
+```
+
+## Index Best Practices
+
+```sql
+-- Standard B-tree index
+create index idx_table_column on public.table_name(column_name);
+
+-- Partial index for common queries
+create index idx_active_users on public.users(id) where deleted_at is null;
+
+-- GIN index for JSONB
+create index idx_table_metadata on public.table_name using gin(metadata);
+
+-- Concurrent index (for production, cannot be in transaction)
+create index concurrently idx_table_column on public.table_name(column_name);
+```
+
+## Migration Safety
+
+### Safe Operations
+- Adding nullable columns
+- Adding tables
+- Adding indexes (preferably CONCURRENTLY)
+- Adding constraints with NOT VALID
+
+### Unsafe Operations (Require Careful Planning)
+- Dropping columns or tables
+- Renaming columns or tables
+- Adding NOT NULL to existing columns
+- Changing column types
+
+### Safe Pattern for Adding NOT NULL
+
+```sql
+-- Step 1: Add column as nullable
+alter table public.table_name add column new_column text;
+
+-- Step 2: Backfill data
+update public.table_name set new_column = 'default_value' where new_column is null;
+
+-- Step 3: Add NOT NULL constraint
+alter table public.table_name alter column new_column set not null;
+```
+
+## Updated At Trigger Function
+
+```sql
+-- Create the shared function (run once)
+create or replace function public.update_updated_at_column()
+returns trigger
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+```
+
+## Rollback Comments
+
+Always include rollback SQL as comments:
+
+```sql
+-- Migration: Create posts table
+create table if not exists public.posts (
+  id uuid primary key default gen_random_uuid(),
+  title text not null,
+  content text,
+  user_id uuid references auth.users(id) on delete cascade not null,
+  created_at timestamptz default now() not null
+);
+
+-- Rollback:
+-- drop table if exists public.posts;
+```

@@ -1,0 +1,299 @@
+---
+description: Code style and quality standards for the project
+globs: ["src/**/*.ts", "src/**/*.tsx"]
+alwaysApply: false
+---
+
+# Code Style Guidelines
+
+## TypeScript Standards
+
+### Strict Type Safety
+- Enable `strict: true` in tsconfig.json
+- Avoid `any` type - use `unknown` and type guards instead
+- Always define return types for functions
+- Use discriminated unions for complex state
+
+### Type Definitions
+
+```typescript
+/**
+ * User settings interface
+ * @author haiping.yu@zoom.us
+ */
+interface UserSettings {
+  readonly id: string;
+  theme: 'light' | 'dark' | 'system';
+  notifications: boolean;
+  language: string;
+}
+
+// Use type for unions and computed types
+type Theme = UserSettings['theme'];
+
+// Use const assertions for immutable data
+const THEMES = ['light', 'dark', 'system'] as const;
+type ThemeType = typeof THEMES[number];
+```
+
+### Function Patterns
+
+```typescript
+/**
+ * Processes user data with validation
+ * @param data - Raw user data from API
+ * @returns Processed and validated user object
+ * @throws ValidationError if data is invalid
+ * @author haiping.yu@zoom.us
+ */
+export function processUserData(data: unknown): User {
+  if (!isValidUserData(data)) {
+    throw new ValidationError('Invalid user data');
+  }
+  return transformUser(data);
+}
+
+// Prefer arrow functions for callbacks and short functions
+const formatDate = (date: Date): string => {
+  return date.toLocaleDateString();
+};
+
+// Use function declarations for hoisted functions
+function isValidUserData(data: unknown): data is RawUserData {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    'id' in data &&
+    typeof (data as RawUserData).id === 'string'
+  );
+}
+```
+
+## React Patterns
+
+### Component Structure
+
+```typescript
+/**
+ * Button component with multiple variants
+ * @author haiping.yu@zoom.us
+ */
+
+import React from 'react';
+import { clsx } from 'clsx';
+
+interface ButtonProps {
+  variant?: 'primary' | 'secondary' | 'danger';
+  size?: 'sm' | 'md' | 'lg';
+  isLoading?: boolean;
+  children: React.ReactNode;
+  onClick?: () => void;
+}
+
+export const Button: React.FC<ButtonProps> = ({
+  variant = 'primary',
+  size = 'md',
+  isLoading = false,
+  children,
+  onClick,
+}) => {
+  return (
+    <button
+      className={clsx(
+        'rounded-lg font-medium transition-colors',
+        {
+          'bg-blue-600 text-white hover:bg-blue-700': variant === 'primary',
+          'bg-gray-200 text-gray-800 hover:bg-gray-300': variant === 'secondary',
+          'bg-red-600 text-white hover:bg-red-700': variant === 'danger',
+        },
+        {
+          'px-2 py-1 text-sm': size === 'sm',
+          'px-4 py-2 text-base': size === 'md',
+          'px-6 py-3 text-lg': size === 'lg',
+        }
+      )}
+      onClick={onClick}
+      disabled={isLoading}
+    >
+      {isLoading ? <LoadingSpinner /> : children}
+    </button>
+  );
+};
+```
+
+### Hooks Pattern
+
+```typescript
+/**
+ * Custom hook for Chrome storage with type safety
+ * @author haiping.yu@zoom.us
+ */
+
+import { useState, useEffect, useCallback } from 'react';
+
+export function useStorage<T>(key: string, defaultValue: T) {
+  const [value, setValue] = useState<T>(defaultValue);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    const loadValue = async () => {
+      try {
+        const result = await chrome.storage.local.get(key);
+        if (result[key] !== undefined) {
+          setValue(result[key] as T);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err : new Error('Unknown error'));
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    loadValue();
+  }, [key]);
+
+  const updateValue = useCallback(async (newValue: T) => {
+    try {
+      await chrome.storage.local.set({ [key]: newValue });
+      setValue(newValue);
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error('Unknown error'));
+    }
+  }, [key]);
+
+  return { value, setValue: updateValue, isLoading, error };
+}
+```
+
+## Error Handling
+
+### Error Classes
+
+```typescript
+/**
+ * Custom error classes for better error handling
+ * @author haiping.yu@zoom.us
+ */
+
+export class ExtensionError extends Error {
+  constructor(
+    message: string,
+    public readonly code: string,
+    public readonly details?: unknown
+  ) {
+    super(message);
+    this.name = 'ExtensionError';
+  }
+}
+
+export class ValidationError extends ExtensionError {
+  constructor(message: string, details?: unknown) {
+    super(message, 'VALIDATION_ERROR', details);
+    this.name = 'ValidationError';
+  }
+}
+
+export class StorageError extends ExtensionError {
+  constructor(message: string, details?: unknown) {
+    super(message, 'STORAGE_ERROR', details);
+    this.name = 'StorageError';
+  }
+}
+```
+
+### Error Boundaries
+
+```typescript
+/**
+ * Error boundary for React components
+ * @author haiping.yu@zoom.us
+ */
+
+import React, { Component, ErrorInfo, ReactNode } from 'react';
+
+interface Props {
+  children: ReactNode;
+  fallback?: ReactNode;
+}
+
+interface State {
+  hasError: boolean;
+  error?: Error;
+}
+
+export class ErrorBoundary extends Component<Props, State> {
+  state: State = { hasError: false };
+
+  static getDerivedStateFromError(error: Error): State {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error('Error caught by boundary:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback || <ErrorFallback error={this.state.error} />;
+    }
+    return this.props.children;
+  }
+}
+```
+
+## Comments and Documentation
+
+### JSDoc Standards
+
+```typescript
+/**
+ * Fetches and caches user preferences from storage
+ * 
+ * @description This function retrieves user preferences from Chrome storage
+ * and caches them in memory for faster subsequent access.
+ * 
+ * @param userId - The unique identifier of the user
+ * @param options - Optional configuration
+ * @param options.forceRefresh - If true, bypasses cache and fetches fresh data
+ * @returns Promise resolving to user preferences
+ * @throws StorageError if Chrome storage is unavailable
+ * 
+ * @example
+ * ```typescript
+ * const prefs = await getUserPreferences('user-123');
+ * console.log(prefs.theme); // 'dark'
+ * ```
+ * 
+ * @author haiping.yu@zoom.us
+ */
+export async function getUserPreferences(
+  userId: string,
+  options?: { forceRefresh?: boolean }
+): Promise<UserPreferences> {
+  // Implementation
+}
+```
+
+### Inline Comments
+- Use `//` for single-line explanations
+- Explain "why" not "what" - code shows what, comments explain why
+- Keep comments up to date with code changes
+- Use TODO/FIXME with issue references: `// TODO(ZOOM-12345): Implement caching`
+
+## File Organization
+
+### Single Responsibility
+- One component per file
+- One hook per file
+- Group related utilities in a single file with named exports
+
+### Index Files
+Use index.ts for clean exports:
+
+```typescript
+// src/components/index.ts
+export { Button } from './Button';
+export { Input } from './Input';
+export { Modal } from './Modal';
+export type { ButtonProps } from './Button';
+```

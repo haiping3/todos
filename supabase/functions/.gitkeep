@@ -1,0 +1,10 @@
+# Supabase Edge Functions
+# Author: haiping.yu@zoom.us
+#
+# Edge Functions to be implemented:
+# - generate-embedding: Generate vector embeddings for knowledge items
+# - process-article: Extract and summarize article content
+# - ai-chat: RAG-based Q&A over knowledge base
+#
+# See: https://supabase.com/docs/guides/functions
+

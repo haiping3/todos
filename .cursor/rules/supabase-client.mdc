@@ -1,0 +1,449 @@
+---
+description: Guidelines for using Supabase client in Chrome extensions
+globs: ["src/**/*.ts", "src/**/*.tsx"]
+alwaysApply: false
+---
+
+# Supabase Client Integration for Chrome Extension
+
+You're a Supabase expert integrating with a Chrome extension. Follow these patterns for secure and efficient Supabase usage.
+
+## Client Setup
+
+```typescript
+/**
+ * Supabase client configuration for Chrome extension
+ * @author haiping.yu@zoom.us
+ */
+
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import type { Database } from '@/types/database';
+
+// Environment variables (from build config)
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  throw new Error('Missing Supabase environment variables');
+}
+
+// Create typed client
+export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: {
+    // Chrome extension specific settings
+    persistSession: true,
+    storage: {
+      // Use chrome.storage instead of localStorage
+      getItem: async (key: string) => {
+        const result = await chrome.storage.local.get(key);
+        return result[key] ?? null;
+      },
+      setItem: async (key: string, value: string) => {
+        await chrome.storage.local.set({ [key]: value });
+      },
+      removeItem: async (key: string) => {
+        await chrome.storage.local.remove(key);
+      },
+    },
+    autoRefreshToken: true,
+    detectSessionInUrl: false, // Not applicable for extensions
+  },
+});
+```
+
+## Type Generation
+
+```bash
+# Generate TypeScript types from your database
+supabase gen types typescript --project-id YOUR_PROJECT_ID > src/types/database.ts
+```
+
+```typescript
+/**
+ * Generated database types (example structure)
+ * @author haiping.yu@zoom.us
+ */
+
+export interface Database {
+  public: {
+    Tables: {
+      profiles: {
+        Row: {
+          id: string;
+          user_id: string;
+          full_name: string | null;
+          avatar_url: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          full_name?: string | null;
+          avatar_url?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          full_name?: string | null;
+          avatar_url?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+      };
+      // ... other tables
+    };
+    Functions: {
+      // ... database functions
+    };
+  };
+}
+```
+
+## Authentication Patterns
+
+### Sign In/Sign Up
+
+```typescript
+/**
+ * Authentication utilities
+ * @author haiping.yu@zoom.us
+ */
+
+import { supabase } from '@/lib/supabase';
+import type { AuthError, User } from '@supabase/supabase-js';
+
+interface AuthResult {
+  user: User | null;
+  error: AuthError | null;
+}
+
+export async function signInWithEmail(
+  email: string,
+  password: string
+): Promise<AuthResult> {
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
+
+  return { user: data.user, error };
+}
+
+export async function signUpWithEmail(
+  email: string,
+  password: string
+): Promise<AuthResult> {
+  const { data, error } = await supabase.auth.signUp({
+    email,
+    password,
+  });
+
+  return { user: data.user, error };
+}
+
+export async function signOut(): Promise<{ error: AuthError | null }> {
+  const { error } = await supabase.auth.signOut();
+  return { error };
+}
+
+export async function getCurrentUser(): Promise<User | null> {
+  const { data: { user } } = await supabase.auth.getUser();
+  return user;
+}
+```
+
+### Auth State Hook
+
+```typescript
+/**
+ * React hook for auth state
+ * @author haiping.yu@zoom.us
+ */
+
+import { useState, useEffect } from 'react';
+import { supabase } from '@/lib/supabase';
+import type { User, Session } from '@supabase/supabase-js';
+
+interface AuthState {
+  user: User | null;
+  session: Session | null;
+  isLoading: boolean;
+}
+
+export function useAuth(): AuthState {
+  const [state, setState] = useState<AuthState>({
+    user: null,
+    session: null,
+    isLoading: true,
+  });
+
+  useEffect(() => {
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setState({
+        user: session?.user ?? null,
+        session,
+        isLoading: false,
+      });
+    });
+
+    // Listen for auth changes
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setState({
+        user: session?.user ?? null,
+        session,
+        isLoading: false,
+      });
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  return state;
+}
+```
+
+## Data Fetching Patterns
+
+### Basic CRUD Operations
+
+```typescript
+/**
+ * Type-safe data operations
+ * @author haiping.yu@zoom.us
+ */
+
+import { supabase } from '@/lib/supabase';
+import type { Database } from '@/types/database';
+
+type Profile = Database['public']['Tables']['profiles']['Row'];
+type ProfileInsert = Database['public']['Tables']['profiles']['Insert'];
+type ProfileUpdate = Database['public']['Tables']['profiles']['Update'];
+
+// Read
+export async function getProfile(userId: string): Promise<Profile | null> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('user_id', userId)
+    .single();
+
+  if (error) {
+    console.error('Error fetching profile:', error);
+    return null;
+  }
+
+  return data;
+}
+
+// Create
+export async function createProfile(profile: ProfileInsert): Promise<Profile | null> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .insert(profile)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Error creating profile:', error);
+    return null;
+  }
+
+  return data;
+}
+
+// Update
+export async function updateProfile(
+  id: string,
+  updates: ProfileUpdate
+): Promise<Profile | null> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .update(updates)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Error updating profile:', error);
+    return null;
+  }
+
+  return data;
+}
+
+// Delete
+export async function deleteProfile(id: string): Promise<boolean> {
+  const { error } = await supabase
+    .from('profiles')
+    .delete()
+    .eq('id', id);
+
+  if (error) {
+    console.error('Error deleting profile:', error);
+    return false;
+  }
+
+  return true;
+}
+```
+
+### React Query Integration
+
+```typescript
+/**
+ * React Query hooks for Supabase data
+ * @author haiping.yu@zoom.us
+ */
+
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { supabase } from '@/lib/supabase';
+
+export function useProfile(userId: string) {
+  return useQuery({
+    queryKey: ['profile', userId],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('user_id', userId)
+        .single();
+
+      if (error) throw error;
+      return data;
+    },
+    enabled: !!userId,
+  });
+}
+
+export function useUpdateProfile() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({ id, updates }: { id: string; updates: ProfileUpdate }) => {
+      const { data, error } = await supabase
+        .from('profiles')
+        .update(updates)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['profile', data.user_id] });
+    },
+  });
+}
+```
+
+## Storage Operations
+
+```typescript
+/**
+ * Supabase Storage utilities
+ * @author haiping.yu@zoom.us
+ */
+
+import { supabase } from '@/lib/supabase';
+
+const AVATAR_BUCKET = 'avatars';
+
+export async function uploadAvatar(
+  userId: string,
+  file: File
+): Promise<string | null> {
+  const fileExt = file.name.split('.').pop();
+  const fileName = `${userId}-${Date.now()}.${fileExt}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from(AVATAR_BUCKET)
+    .upload(fileName, file, {
+      cacheControl: '3600',
+      upsert: true,
+    });
+
+  if (uploadError) {
+    console.error('Upload error:', uploadError);
+    return null;
+  }
+
+  const { data } = supabase.storage
+    .from(AVATAR_BUCKET)
+    .getPublicUrl(fileName);
+
+  return data.publicUrl;
+}
+
+export async function deleteAvatar(fileName: string): Promise<boolean> {
+  const { error } = await supabase.storage
+    .from(AVATAR_BUCKET)
+    .remove([fileName]);
+
+  if (error) {
+    console.error('Delete error:', error);
+    return false;
+  }
+
+  return true;
+}
+```
+
+## Error Handling
+
+```typescript
+/**
+ * Supabase error handling utilities
+ * @author haiping.yu@zoom.us
+ */
+
+import type { PostgrestError } from '@supabase/supabase-js';
+
+export function isPostgrestError(error: unknown): error is PostgrestError {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    'message' in error
+  );
+}
+
+export function getErrorMessage(error: unknown): string {
+  if (isPostgrestError(error)) {
+    // Handle specific Postgres error codes
+    switch (error.code) {
+      case '23505':
+        return 'This record already exists';
+      case '23503':
+        return 'Referenced record not found';
+      case '42501':
+        return 'Permission denied';
+      default:
+        return error.message;
+    }
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return 'An unknown error occurred';
+}
+```
+
+## Security Considerations
+
+1. **Never expose service role key** in client-side code
+2. **Use anon key** with RLS policies for client access
+3. **Validate data** before sending to Supabase
+4. **Use typed clients** to prevent query errors
+5. **Handle auth state** properly in service worker context
+6. **Store tokens securely** using Chrome storage APIs

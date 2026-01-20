@@ -1,0 +1,241 @@
+---
+description: PostgreSQL SQL style guide for Supabase projects
+globs: ["**/*.sql", "supabase/**/*"]
+alwaysApply: false
+---
+
+# PostgreSQL SQL Style Guide
+
+You're a Supabase Postgres expert. Follow this SQL style guide for consistent, readable, and maintainable SQL code.
+
+## General Formatting
+
+### Keywords
+- Use lowercase for SQL keywords: `select`, `from`, `where`, `join`
+- Use lowercase for data types: `text`, `integer`, `uuid`, `timestamptz`
+
+### Naming Conventions
+
+| Object | Convention | Example |
+|--------|------------|---------|
+| Tables | snake_case, plural | `user_profiles`, `order_items` |
+| Columns | snake_case | `created_at`, `user_id` |
+| Primary Keys | `id` | `id uuid primary key` |
+| Foreign Keys | `{table}_id` | `user_id`, `order_id` |
+| Indexes | `idx_{table}_{column}` | `idx_users_email` |
+| Functions | snake_case, verb prefix | `get_user_by_id`, `calculate_total` |
+| Triggers | `{action}_{table}_{timing}` | `update_users_updated_at` |
+| Policies | `{table}_{operation}_{description}` | `posts_select_own` |
+
+### Indentation and Spacing
+
+```sql
+-- Use 2 spaces for indentation
+-- Align keywords for readability
+select
+  u.id,
+  u.email,
+  u.created_at,
+  p.full_name
+from public.users u
+inner join public.profiles p
+  on p.user_id = u.id
+where u.deleted_at is null
+  and u.status = 'active'
+order by u.created_at desc
+limit 10;
+```
+
+## Query Structure
+
+### SELECT Statements
+
+```sql
+-- Single line for simple queries
+select id, name from public.users where id = $1;
+
+-- Multi-line for complex queries
+select
+  u.id,
+  u.email,
+  count(p.id) as post_count
+from public.users u
+left join public.posts p
+  on p.author_id = u.id
+where u.created_at >= now() - interval '30 days'
+group by u.id, u.email
+having count(p.id) > 5
+order by post_count desc;
+```
+
+### INSERT Statements
+
+```sql
+-- Explicit column list
+insert into public.users (email, name, role)
+values ('user@example.com', 'John Doe', 'member');
+
+-- Multiple rows
+insert into public.tags (name, slug)
+values
+  ('Technology', 'technology'),
+  ('Design', 'design'),
+  ('Business', 'business');
+
+-- Insert with returning
+insert into public.users (email, name)
+values ('user@example.com', 'John Doe')
+returning id, created_at;
+```
+
+### UPDATE Statements
+
+```sql
+-- Simple update
+update public.users
+set
+  name = 'Jane Doe',
+  updated_at = now()
+where id = $1;
+
+-- Update with subquery
+update public.posts
+set view_count = view_count + 1
+where id = $1
+returning id, view_count;
+```
+
+### DELETE Statements
+
+```sql
+-- Soft delete (preferred)
+update public.users
+set deleted_at = now()
+where id = $1;
+
+-- Hard delete
+delete from public.sessions
+where expires_at < now();
+```
+
+## Table Definitions
+
+```sql
+-- Standard table structure
+create table if not exists public.posts (
+  -- Primary key first
+  id uuid primary key default gen_random_uuid(),
+  
+  -- Foreign keys
+  author_id uuid references auth.users(id) on delete cascade not null,
+  category_id uuid references public.categories(id) on delete set null,
+  
+  -- Required fields
+  title text not null,
+  slug text not null,
+  
+  -- Optional fields
+  content text,
+  excerpt text,
+  
+  -- Status/enum fields
+  status text check (status in ('draft', 'published', 'archived')) default 'draft',
+  
+  -- Metadata
+  metadata jsonb default '{}'::jsonb,
+  
+  -- Timestamps last
+  published_at timestamptz,
+  created_at timestamptz default now() not null,
+  updated_at timestamptz default now() not null,
+  
+  -- Constraints
+  constraint posts_slug_unique unique (slug)
+);
+
+-- Add comments
+comment on table public.posts is 'Blog posts created by users';
+comment on column public.posts.slug is 'URL-friendly identifier';
+```
+
+## Common Patterns
+
+### Pagination
+
+```sql
+-- Offset-based (simpler, less performant for large datasets)
+select * from public.posts
+order by created_at desc
+limit $1 offset $2;
+
+-- Cursor-based (more performant)
+select * from public.posts
+where created_at < $1  -- cursor value
+order by created_at desc
+limit $2;
+```
+
+### Full-Text Search
+
+```sql
+-- Add search vector column
+alter table public.posts
+add column search_vector tsvector
+generated always as (
+  setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
+  setweight(to_tsvector('english', coalesce(content, '')), 'B')
+) stored;
+
+-- Create GIN index
+create index idx_posts_search on public.posts using gin(search_vector);
+
+-- Search query
+select * from public.posts
+where search_vector @@ plainto_tsquery('english', $1)
+order by ts_rank(search_vector, plainto_tsquery('english', $1)) desc;
+```
+
+### Upsert
+
+```sql
+-- Insert or update
+insert into public.user_settings (user_id, theme, notifications)
+values ($1, $2, $3)
+on conflict (user_id)
+do update set
+  theme = excluded.theme,
+  notifications = excluded.notifications,
+  updated_at = now();
+```
+
+### Soft Delete Filter
+
+```sql
+-- Create a view for non-deleted records
+create view public.active_users as
+select * from public.users
+where deleted_at is null;
+```
+
+## Anti-Patterns to Avoid
+
+```sql
+-- ❌ Don't use SELECT *
+select * from public.users;
+
+-- ✅ Specify columns explicitly
+select id, email, name from public.users;
+
+-- ❌ Don't use implicit joins
+select * from users, orders where users.id = orders.user_id;
+
+-- ✅ Use explicit JOIN syntax
+select * from users
+inner join orders on orders.user_id = users.id;
+
+-- ❌ Don't concatenate user input
+execute 'select * from users where name = ''' || user_input || '''';
+
+-- ✅ Use parameterized queries
+select * from users where name = $1;
+```

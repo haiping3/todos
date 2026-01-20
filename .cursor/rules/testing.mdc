@@ -1,0 +1,335 @@
+---
+description: Testing standards and patterns for the Chrome extension
+globs: ["src/**/*.test.ts", "src/**/*.test.tsx", "src/**/*.spec.ts"]
+alwaysApply: false
+---
+
+# Testing Guidelines
+
+## Testing Stack
+
+| Tool | Purpose |
+|------|---------|
+| Vitest | Unit testing framework |
+| @testing-library/react | React component testing |
+| jest-chrome | Chrome API mocking |
+| MSW | API mocking |
+
+## Test File Organization
+
+```
+src/
+├── components/
+│   ├── Button.tsx
+│   └── Button.test.tsx      # Co-located test file
+├── hooks/
+│   ├── useStorage.ts
+│   └── useStorage.test.ts
+├── utils/
+│   ├── validation.ts
+│   └── validation.test.ts
+└── __tests__/               # Integration tests
+    └── popup.integration.test.tsx
+```
+
+## Unit Testing Patterns
+
+### Component Tests
+
+```typescript
+/**
+ * Button component tests
+ * @author haiping.yu@zoom.us
+ */
+
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { Button } from './Button';
+
+describe('Button', () => {
+  it('renders children correctly', () => {
+    render(<Button>Click me</Button>);
+    expect(screen.getByRole('button')).toHaveTextContent('Click me');
+  });
+
+  it('calls onClick when clicked', () => {
+    const handleClick = vi.fn();
+    render(<Button onClick={handleClick}>Click</Button>);
+    
+    fireEvent.click(screen.getByRole('button'));
+    
+    expect(handleClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('is disabled when loading', () => {
+    render(<Button isLoading>Submit</Button>);
+    expect(screen.getByRole('button')).toBeDisabled();
+  });
+
+  it('applies correct variant styles', () => {
+    const { rerender } = render(<Button variant="primary">Test</Button>);
+    expect(screen.getByRole('button')).toHaveClass('bg-blue-600');
+
+    rerender(<Button variant="danger">Test</Button>);
+    expect(screen.getByRole('button')).toHaveClass('bg-red-600');
+  });
+});
+```
+
+### Hook Tests
+
+```typescript
+/**
+ * useStorage hook tests
+ * @author haiping.yu@zoom.us
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { renderHook, act, waitFor } from '@testing-library/react';
+import { useStorage } from './useStorage';
+
+// Mock Chrome storage API
+const mockStorage = {
+  local: {
+    get: vi.fn(),
+    set: vi.fn(),
+  },
+};
+
+vi.stubGlobal('chrome', { storage: mockStorage });
+
+describe('useStorage', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('loads initial value from storage', async () => {
+    mockStorage.local.get.mockResolvedValue({ theme: 'dark' });
+
+    const { result } = renderHook(() => useStorage('theme', 'light'));
+
+    expect(result.current.isLoading).toBe(true);
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    expect(result.current.value).toBe('dark');
+  });
+
+  it('updates storage when value changes', async () => {
+    mockStorage.local.get.mockResolvedValue({});
+    mockStorage.local.set.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() => useStorage('theme', 'light'));
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    await act(async () => {
+      await result.current.setValue('dark');
+    });
+
+    expect(mockStorage.local.set).toHaveBeenCalledWith({ theme: 'dark' });
+    expect(result.current.value).toBe('dark');
+  });
+});
+```
+
+### Utility Tests
+
+```typescript
+/**
+ * Validation utility tests
+ * @author haiping.yu@zoom.us
+ */
+
+import { describe, it, expect } from 'vitest';
+import { validateUrl, validateEmail, sanitizeInput } from './validation';
+
+describe('validateUrl', () => {
+  it('accepts valid HTTP URLs', () => {
+    expect(validateUrl('http://example.com')).toBe(true);
+    expect(validateUrl('https://example.com/path?query=1')).toBe(true);
+  });
+
+  it('rejects invalid URLs', () => {
+    expect(validateUrl('not-a-url')).toBe(false);
+    expect(validateUrl('javascript:alert(1)')).toBe(false);
+    expect(validateUrl('')).toBe(false);
+  });
+});
+
+describe('sanitizeInput', () => {
+  it('removes HTML tags', () => {
+    expect(sanitizeInput('<script>alert(1)</script>')).toBe('alert(1)');
+  });
+
+  it('trims whitespace', () => {
+    expect(sanitizeInput('  hello  ')).toBe('hello');
+  });
+});
+```
+
+## Chrome API Mocking
+
+### Setup
+
+```typescript
+/**
+ * Chrome API mock setup for tests
+ * @author haiping.yu@zoom.us
+ */
+
+import { vi } from 'vitest';
+
+export const mockChrome = {
+  runtime: {
+    sendMessage: vi.fn(),
+    onMessage: {
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    },
+    lastError: null,
+  },
+  storage: {
+    local: {
+      get: vi.fn(),
+      set: vi.fn(),
+      remove: vi.fn(),
+    },
+    sync: {
+      get: vi.fn(),
+      set: vi.fn(),
+    },
+    onChanged: {
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    },
+  },
+  tabs: {
+    query: vi.fn(),
+    sendMessage: vi.fn(),
+    create: vi.fn(),
+  },
+};
+
+// Apply mock globally
+vi.stubGlobal('chrome', mockChrome);
+```
+
+### Usage in Tests
+
+```typescript
+import { mockChrome } from '../__mocks__/chrome';
+
+describe('background service worker', () => {
+  it('handles GET_DATA message', async () => {
+    const sendResponse = vi.fn();
+    
+    // Simulate message handling
+    await handleMessage(
+      { type: 'GET_DATA', payload: { id: '123' } },
+      { tab: { id: 1 } },
+      sendResponse
+    );
+
+    expect(sendResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ success: true })
+    );
+  });
+});
+```
+
+## Integration Testing
+
+```typescript
+/**
+ * Popup integration tests
+ * @author haiping.yu@zoom.us
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { Popup } from '../popup/Popup';
+import { mockChrome } from '../__mocks__/chrome';
+
+describe('Popup Integration', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChrome.storage.local.get.mockResolvedValue({
+      settings: { theme: 'light', notifications: true },
+    });
+  });
+
+  it('loads and displays user settings', async () => {
+    render(<Popup />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Settings')).toBeInTheDocument();
+    });
+
+    expect(screen.getByLabelText('Theme')).toHaveValue('light');
+    expect(screen.getByLabelText('Notifications')).toBeChecked();
+  });
+
+  it('saves settings when form is submitted', async () => {
+    render(<Popup />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Settings')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByLabelText('Notifications'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockChrome.storage.local.set).toHaveBeenCalledWith({
+        settings: expect.objectContaining({ notifications: false }),
+      });
+    });
+  });
+});
+```
+
+## Test Coverage Goals
+
+| Type | Target Coverage |
+|------|-----------------|
+| Statements | 80% |
+| Branches | 75% |
+| Functions | 85% |
+| Lines | 80% |
+
+## Best Practices
+
+### Do's
+- Write tests before or alongside code (TDD/BDD)
+- Test behavior, not implementation details
+- Use descriptive test names that explain expected behavior
+- Keep tests isolated and independent
+- Mock external dependencies (Chrome APIs, network)
+
+### Don'ts
+- Don't test internal implementation details
+- Don't write tests that depend on other tests
+- Don't test third-party library behavior
+- Don't ignore flaky tests - fix them
+- Don't mock what you don't own excessively
+
+## Running Tests
+
+```bash
+# Run all tests
+pnpm test
+
+# Run tests in watch mode
+pnpm test:watch
+
+# Run with coverage
+pnpm test:coverage
+
+# Run specific test file
+pnpm test src/hooks/useStorage.test.ts
+```

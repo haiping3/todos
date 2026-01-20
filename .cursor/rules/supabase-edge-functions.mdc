@@ -1,0 +1,375 @@
+---
+description: Guidelines for writing Supabase Edge Functions
+globs: ["supabase/functions/**/*"]
+alwaysApply: false
+---
+
+# Supabase Edge Functions
+
+You're a Supabase expert in writing Edge Functions. Follow these best practices for secure, performant edge functions.
+
+## Project Structure
+
+```
+supabase/
+└── functions/
+    ├── _shared/           # Shared utilities
+    │   ├── cors.ts
+    │   ├── supabase.ts
+    │   └── types.ts
+    ├── hello-world/
+    │   └── index.ts
+    └── process-webhook/
+        └── index.ts
+```
+
+## Basic Function Template
+
+```typescript
+/**
+ * Edge function template
+ * @author haiping.yu@zoom.us
+ */
+
+import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+serve(async (req: Request) => {
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
+
+  try {
+    // Create Supabase client with user's auth
+    const supabaseClient = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      {
+        global: {
+          headers: { Authorization: req.headers.get('Authorization')! },
+        },
+      }
+    );
+
+    // Get authenticated user
+    const {
+      data: { user },
+      error: authError,
+    } = await supabaseClient.auth.getUser();
+
+    if (authError || !user) {
+      throw new Error('Unauthorized');
+    }
+
+    // Parse request body
+    const { name } = await req.json();
+
+    // Your logic here
+    const data = {
+      message: `Hello ${name}!`,
+      userId: user.id,
+    };
+
+    return new Response(JSON.stringify(data), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: 200,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return new Response(JSON.stringify({ error: message }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: error.message === 'Unauthorized' ? 401 : 400,
+    });
+  }
+});
+```
+
+## Shared CORS Helper
+
+```typescript
+/**
+ * supabase/functions/_shared/cors.ts
+ * @author haiping.yu@zoom.us
+ */
+
+export const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+};
+
+export function handleCors(req: Request): Response | null {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
+  return null;
+}
+```
+
+## Shared Supabase Client
+
+```typescript
+/**
+ * supabase/functions/_shared/supabase.ts
+ * @author haiping.yu@zoom.us
+ */
+
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+export type SupabaseClientType = SupabaseClient;
+
+// Client with user auth (respects RLS)
+export function createUserClient(req: Request): SupabaseClient {
+  return createClient(
+    Deno.env.get('SUPABASE_URL') ?? '',
+    Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+    {
+      global: {
+        headers: { Authorization: req.headers.get('Authorization')! },
+      },
+    }
+  );
+}
+
+// Admin client (bypasses RLS) - use carefully!
+export function createAdminClient(): SupabaseClient {
+  return createClient(
+    Deno.env.get('SUPABASE_URL') ?? '',
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
+    {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    }
+  );
+}
+```
+
+## Webhook Handler Pattern
+
+```typescript
+/**
+ * Webhook handler with signature verification
+ * @author haiping.yu@zoom.us
+ */
+
+import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { createHmac } from 'https://deno.land/std@0.168.0/crypto/mod.ts';
+
+const WEBHOOK_SECRET = Deno.env.get('WEBHOOK_SECRET')!;
+
+async function verifySignature(
+  payload: string,
+  signature: string
+): Promise<boolean> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(WEBHOOK_SECRET),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  const signatureBytes = await crypto.subtle.sign(
+    'HMAC',
+    key,
+    encoder.encode(payload)
+  );
+
+  const expectedSignature = btoa(
+    String.fromCharCode(...new Uint8Array(signatureBytes))
+  );
+
+  return signature === expectedSignature;
+}
+
+serve(async (req: Request) => {
+  try {
+    const signature = req.headers.get('x-webhook-signature');
+    const payload = await req.text();
+
+    if (!signature || !(await verifySignature(payload, signature))) {
+      return new Response('Invalid signature', { status: 401 });
+    }
+
+    const data = JSON.parse(payload);
+    
+    // Process webhook...
+    console.log('Webhook received:', data);
+
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    console.error('Webhook error:', error);
+    return new Response('Internal error', { status: 500 });
+  }
+});
+```
+
+## Database Trigger Function
+
+```typescript
+/**
+ * Function triggered by database webhook
+ * @author haiping.yu@zoom.us
+ */
+
+import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { createAdminClient } from '../_shared/supabase.ts';
+
+interface WebhookPayload {
+  type: 'INSERT' | 'UPDATE' | 'DELETE';
+  table: string;
+  schema: string;
+  record: Record<string, unknown>;
+  old_record: Record<string, unknown> | null;
+}
+
+serve(async (req: Request) => {
+  const payload: WebhookPayload = await req.json();
+
+  console.log(`${payload.type} on ${payload.table}:`, payload.record);
+
+  const supabase = createAdminClient();
+
+  // Example: Send notification on new message
+  if (payload.type === 'INSERT' && payload.table === 'messages') {
+    const { room_id, user_id, content } = payload.record as {
+      room_id: string;
+      user_id: string;
+      content: string;
+    };
+
+    // Get room members to notify
+    const { data: members } = await supabase
+      .from('room_members')
+      .select('user_id')
+      .eq('room_id', room_id)
+      .neq('user_id', user_id);
+
+    // Create notifications
+    if (members && members.length > 0) {
+      await supabase.from('notifications').insert(
+        members.map((member) => ({
+          user_id: member.user_id,
+          type: 'new_message',
+          data: { room_id, content: content.slice(0, 100) },
+        }))
+      );
+    }
+  }
+
+  return new Response(JSON.stringify({ success: true }), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+});
+```
+
+## Environment Variables
+
+```typescript
+// Access environment variables
+const apiKey = Deno.env.get('EXTERNAL_API_KEY');
+
+// Required variables (fail fast)
+function getRequiredEnv(key: string): string {
+  const value = Deno.env.get(key);
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${key}`);
+  }
+  return value;
+}
+
+const supabaseUrl = getRequiredEnv('SUPABASE_URL');
+```
+
+## Error Handling Pattern
+
+```typescript
+/**
+ * Standardized error handling
+ * @author haiping.yu@zoom.us
+ */
+
+class AppError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number = 400,
+    public code: string = 'ERROR'
+  ) {
+    super(message);
+    this.name = 'AppError';
+  }
+}
+
+function handleError(error: unknown): Response {
+  console.error('Function error:', error);
+
+  if (error instanceof AppError) {
+    return new Response(
+      JSON.stringify({ error: error.message, code: error.code }),
+      {
+        status: error.statusCode,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  // Generic error (don't expose details)
+  return new Response(
+    JSON.stringify({ error: 'Internal server error', code: 'INTERNAL_ERROR' }),
+    {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    }
+  );
+}
+```
+
+## Testing Locally
+
+```bash
+# Start local Supabase
+supabase start
+
+# Serve functions locally
+supabase functions serve
+
+# Invoke function
+curl -i --location --request POST 'http://localhost:54321/functions/v1/hello-world' \
+  --header 'Authorization: Bearer YOUR_ANON_KEY' \
+  --header 'Content-Type: application/json' \
+  --data '{"name":"World"}'
+```
+
+## Deployment
+
+```bash
+# Deploy single function
+supabase functions deploy hello-world
+
+# Deploy all functions
+supabase functions deploy
+
+# Set secrets
+supabase secrets set EXTERNAL_API_KEY=your-key
+```
+
+## Best Practices
+
+1. **Keep functions focused:** One function = one responsibility
+2. **Use shared code:** Put reusable logic in `_shared/`
+3. **Validate input:** Always validate request body and parameters
+4. **Handle errors gracefully:** Return appropriate status codes
+5. **Log appropriately:** Use `console.log` for debugging, but don't log sensitive data
+6. **Use environment variables:** Never hardcode secrets
+7. **Set appropriate timeouts:** Default is 60s, adjust if needed

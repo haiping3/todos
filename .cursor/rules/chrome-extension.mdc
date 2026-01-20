@@ -1,0 +1,221 @@
+---
+description: Chrome Extension development guidelines and best practices
+globs: ["src/**/*", "public/manifest.json"]
+alwaysApply: false
+---
+
+# Chrome Extension Development Rules
+
+## Manifest V3 Requirements
+
+### Must Follow
+- Use `service_worker` instead of background pages
+- Use `chrome.scripting.executeScript()` instead of `chrome.tabs.executeScript()`
+- Declare all permissions in `permissions` or `optional_permissions`
+- Use `chrome.storage` instead of localStorage for persistence
+- Content Security Policy must be declared if using inline scripts
+
+### Manifest Structure
+
+```json
+{
+  "manifest_version": 3,
+  "name": "Extension Name",
+  "version": "1.0.0",
+  "description": "Extension description",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [{
+    "matches": ["<all_urls>"],
+    "js": ["content.js"]
+  }],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
+```
+
+## Service Worker (Background Script)
+
+### Lifecycle Awareness
+- Service workers can be terminated at any time
+- Do NOT store state in global variables
+- Use `chrome.storage` for persistent data
+- Use `chrome.alarms` for scheduled tasks instead of `setInterval`
+
+### Pattern
+
+```typescript
+/**
+ * Service worker entry point
+ * @author haiping.yu@zoom.us
+ */
+
+// Listen for installation
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === 'install') {
+    // First-time installation logic
+  }
+});
+
+// Message handling
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Handle messages from content scripts or popup
+  // Return true if response is async
+  return true;
+});
+```
+
+## Content Scripts
+
+### Security Rules
+- Never trust data from the host page
+- Validate all data received via `window.postMessage`
+- Use `chrome.runtime.sendMessage` for communication with background
+- Avoid injecting scripts that could be manipulated
+
+### Pattern
+
+```typescript
+/**
+ * Content script - injected into web pages
+ * @author haiping.yu@zoom.us
+ */
+
+// Isolated world - safe from page scripts
+const handleMessage = (event: MessageEvent) => {
+  // Validate origin
+  if (event.origin !== window.location.origin) return;
+  
+  // Validate message structure
+  if (!isValidMessage(event.data)) return;
+  
+  // Process message
+};
+
+window.addEventListener('message', handleMessage);
+```
+
+## Chrome Storage
+
+### Use Patterns
+
+```typescript
+/**
+ * Storage utility with type safety
+ * @author haiping.yu@zoom.us
+ */
+
+interface StorageSchema {
+  settings: UserSettings;
+  cache: CacheData;
+}
+
+// Type-safe get
+export async function getStorage<K extends keyof StorageSchema>(
+  key: K
+): Promise<StorageSchema[K] | undefined> {
+  const result = await chrome.storage.local.get(key);
+  return result[key];
+}
+
+// Type-safe set
+export async function setStorage<K extends keyof StorageSchema>(
+  key: K,
+  value: StorageSchema[K]
+): Promise<void> {
+  await chrome.storage.local.set({ [key]: value });
+}
+```
+
+### Storage Choices
+| Storage Type | Use Case | Sync Limit | Local Limit |
+|--------------|----------|------------|-------------|
+| `chrome.storage.sync` | User preferences that sync | 100KB total | N/A |
+| `chrome.storage.local` | Large data, device-specific | N/A | 10MB total |
+| `chrome.storage.session` | Temporary session data | 10MB | 10MB |
+
+## Message Passing
+
+### Between Components
+
+```typescript
+// Define message types
+interface MessageMap {
+  GET_DATA: { type: 'GET_DATA'; payload: { id: string } };
+  DATA_RESPONSE: { type: 'DATA_RESPONSE'; payload: { data: unknown } };
+}
+
+// Type-safe message sending
+async function sendMessage<T extends keyof MessageMap>(
+  message: MessageMap[T]
+): Promise<unknown> {
+  return chrome.runtime.sendMessage(message);
+}
+```
+
+## Permissions
+
+### Principle of Least Privilege
+- Request only necessary permissions
+- Use `optional_permissions` for features that might not be used
+- Explain to users why each permission is needed
+
+### Common Permissions
+| Permission | Use Case |
+|------------|----------|
+| `storage` | Store extension data |
+| `activeTab` | Access current tab on user action |
+| `tabs` | Access tab URLs and titles |
+| `scripting` | Inject scripts into pages |
+| `alarms` | Schedule background tasks |
+| `notifications` | Show desktop notifications |
+
+## Error Handling
+
+```typescript
+// Always check for chrome.runtime.lastError
+chrome.storage.local.get('key', (result) => {
+  if (chrome.runtime.lastError) {
+    console.error('Storage error:', chrome.runtime.lastError.message);
+    return;
+  }
+  // Process result
+});
+
+// Async/await pattern
+try {
+  const result = await chrome.storage.local.get('key');
+} catch (error) {
+  console.error('Storage error:', error);
+}
+```
+
+## Testing
+
+### Manual Testing
+1. Load unpacked extension from `dist/` folder
+2. Test in incognito mode (ensure it works with permissions)
+3. Test extension reload and persistence
+4. Test service worker termination and recovery
+
+### Unit Testing
+- Mock Chrome APIs using `jest-chrome` or similar
+- Test message handlers independently
+- Test storage operations with mocked storage

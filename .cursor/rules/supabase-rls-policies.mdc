@@ -1,0 +1,220 @@
+---
+description: Guidelines for creating Supabase Row Level Security policies
+globs: ["**/*.sql", "supabase/migrations/**/*"]
+alwaysApply: false
+---
+
+# Database: Create RLS Policies
+
+You're a Supabase Postgres expert in writing Row Level Security (RLS) policies. Generate **secure and performant RLS policies** that adhere to the following best practices:
+
+## General Guidelines
+
+1. **Always Enable RLS:**
+   - Enable RLS on all tables that contain user data
+   - Use `alter table table_name enable row level security;`
+
+2. **Default Deny:**
+   - Without policies, RLS-enabled tables deny all access
+   - Create explicit policies for each required operation
+
+3. **Use `auth.uid()` for User Identification:**
+   - This returns the authenticated user's UUID
+   - Never trust client-provided user IDs
+
+## Policy Naming Convention
+
+Use descriptive names that indicate:
+- The table name
+- The operation (select, insert, update, delete)
+- The role or condition
+
+Format: `{table}_{operation}_{description}`
+
+Example: `posts_select_own`, `posts_insert_authenticated`
+
+## Common Policy Patterns
+
+### Users Can Only Access Their Own Data
+
+```sql
+-- Enable RLS
+alter table public.profiles enable row level security;
+
+-- Select: Users can only view their own profile
+create policy "profiles_select_own"
+  on public.profiles
+  for select
+  to authenticated
+  using (auth.uid() = user_id);
+
+-- Insert: Users can only insert their own profile
+create policy "profiles_insert_own"
+  on public.profiles
+  for insert
+  to authenticated
+  with check (auth.uid() = user_id);
+
+-- Update: Users can only update their own profile
+create policy "profiles_update_own"
+  on public.profiles
+  for update
+  to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- Delete: Users can only delete their own profile
+create policy "profiles_delete_own"
+  on public.profiles
+  for delete
+  to authenticated
+  using (auth.uid() = user_id);
+```
+
+### Public Read, Authenticated Write
+
+```sql
+-- Enable RLS
+alter table public.posts enable row level security;
+
+-- Anyone can read published posts
+create policy "posts_select_published"
+  on public.posts
+  for select
+  to anon, authenticated
+  using (status = 'published');
+
+-- Authenticated users can create posts
+create policy "posts_insert_authenticated"
+  on public.posts
+  for insert
+  to authenticated
+  with check (auth.uid() = author_id);
+
+-- Authors can update their own posts
+create policy "posts_update_own"
+  on public.posts
+  for update
+  to authenticated
+  using (auth.uid() = author_id)
+  with check (auth.uid() = author_id);
+```
+
+### Team/Organization Based Access
+
+```sql
+-- Enable RLS
+alter table public.team_documents enable row level security;
+
+-- Team members can view team documents
+create policy "team_documents_select_team_member"
+  on public.team_documents
+  for select
+  to authenticated
+  using (
+    exists (
+      select 1 from public.team_members
+      where team_members.team_id = team_documents.team_id
+        and team_members.user_id = auth.uid()
+    )
+  );
+
+-- Team admins can manage documents
+create policy "team_documents_all_admin"
+  on public.team_documents
+  for all
+  to authenticated
+  using (
+    exists (
+      select 1 from public.team_members
+      where team_members.team_id = team_documents.team_id
+        and team_members.user_id = auth.uid()
+        and team_members.role = 'admin'
+    )
+  );
+```
+
+### Role-Based Access Control
+
+```sql
+-- Check user role from a roles table or JWT claim
+create policy "admin_full_access"
+  on public.settings
+  for all
+  to authenticated
+  using (
+    (auth.jwt() ->> 'role')::text = 'admin'
+  );
+
+-- Alternative: Check from a database table
+create policy "admin_full_access_db"
+  on public.settings
+  for all
+  to authenticated
+  using (
+    exists (
+      select 1 from public.user_roles
+      where user_roles.user_id = auth.uid()
+        and user_roles.role = 'admin'
+    )
+  );
+```
+
+## Performance Optimization
+
+### Use Indexes on Policy Columns
+
+```sql
+-- Create index on columns used in RLS policies
+create index idx_posts_author_id on public.posts(author_id);
+create index idx_team_members_lookup on public.team_members(team_id, user_id);
+```
+
+### Avoid Complex Subqueries
+
+```sql
+-- ❌ Bad: Complex subquery in policy
+using (
+  user_id in (
+    select user_id from public.team_members
+    where team_id in (
+      select team_id from public.teams where org_id = ...
+    )
+  )
+)
+
+-- ✅ Good: Use a security definer function
+create or replace function public.user_has_access(resource_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = ''
+stable
+as $$
+  select exists (
+    select 1 from public.access_grants
+    where access_grants.resource_id = user_has_access.resource_id
+      and access_grants.user_id = auth.uid()
+  );
+$$;
+
+-- Then use in policy
+using (public.user_has_access(id))
+```
+
+## Security Considerations
+
+1. **Never bypass RLS for client queries:**
+   - Use service role only in trusted server environments
+
+2. **Test policies thoroughly:**
+   - Test with different user roles
+   - Test edge cases (null values, missing relations)
+
+3. **Audit policy changes:**
+   - Document why each policy exists
+   - Review policies during security audits
+
+4. **Use WITH CHECK for insert/update:**
+   - Ensures data written also passes the policy
+   - Prevents users from writing data they can't read
