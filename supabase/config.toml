@@ -53,6 +53,5 @@ port = 54327
 vector_port = 54328
 
 # AI/Vector configuration for pgvector
-[db.extensions]
-enabled = true
+# Note: Extensions are configured via migrations, not in config.toml
 

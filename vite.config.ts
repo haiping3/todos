@@ -19,6 +19,7 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
+        index: resolve(__dirname, 'index.html'), // Dev preview page
         popup: resolve(__dirname, 'src/popup/index.html'),
         options: resolve(__dirname, 'src/options/index.html'),
         background: resolve(__dirname, 'src/background/service-worker.ts'),
@@ -48,6 +49,8 @@ export default defineConfig({
     hmr: {
       port: 5173,
     },
+    // Redirect root to popup for easier development
+    open: '/src/popup/index.html',
   },
 });
 

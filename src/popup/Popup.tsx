@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useCallback, useEffect } from 'react';
-import { ListTodo, BookOpen, Settings, Plus, Sparkles } from 'lucide-react';
+import { ListTodo, BookOpen, Settings, Plus, Sparkles, User, LogOut, Cloud, CloudOff, RefreshCw } from 'lucide-react';
 import { 
   TodoList, 
   TodoForm, 
@@ -19,6 +19,7 @@ import {
   KnowledgeDetail,
   QuickSaveButton,
   AIAnalysisPanel,
+  Auth,
 } from '@/components';
 import type { TodoFormData } from '@/components';
 import { useTodos } from '@/hooks/useTodos';
@@ -26,6 +27,9 @@ import { usePendingAttachments } from '@/hooks/useAttachments';
 import { useSettings } from '@/hooks/useSettings';
 import { useAIConfig } from '@/hooks/useAIConfig';
 import { useKnowledge } from '@/hooks/useKnowledge';
+import { useAuth } from '@/hooks/useAuth';
+import { getSyncStatusInfo, syncTodosToCloud, syncTodosFromCloud, syncKnowledgeToCloud, syncKnowledgeFromCloud } from '@/utils/sync';
+import type { Todo, KnowledgeItem } from '@/types';
 import { deleteAttachmentsByTodo } from '@/utils/indexeddb';
 import { extractCurrentPageContent, getFaviconUrl } from '@/utils/content-extractor';
 import {
@@ -39,13 +43,16 @@ import {
   summarizeTodoList,
   suggestTodoCategories,
 } from '@/utils/ai';
-import type { Todo, KnowledgeItem } from '@/types';
 
 type Tab = 'todos' | 'knowledge' | 'settings';
 
 export const Popup: React.FC = () => {
+  const { isAuthenticated, isLoading: authLoading, isConfigured, user, signOut } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>('todos');
   const [quickAddMode, setQuickAddMode] = useState(false);
+  const [showAuth, setShowAuth] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<{ todos: { lastSync: string | null; pending: boolean }; knowledge: { lastSync: string | null; pending: boolean } } | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // Check for quick-add mode from URL params or storage
   useEffect(() => {
@@ -67,13 +74,188 @@ export const Popup: React.FC = () => {
     });
   }, []);
 
+  // Show auth if not configured or not authenticated (but allow skipping if not configured)
+  useEffect(() => {
+    if (!authLoading) {
+      if (!isConfigured) {
+        // Supabase not configured - allow using app without auth
+        setShowAuth(false);
+      } else if (!isAuthenticated) {
+        // Configured but not authenticated - show auth
+        setShowAuth(true);
+      } else {
+        // Authenticated - hide auth
+        setShowAuth(false);
+      }
+    }
+  }, [isAuthenticated, isConfigured, authLoading]);
+
+  const handleAuthSuccess = () => {
+    setShowAuth(false);
+  };
+
+  const handleSignOut = async () => {
+    await signOut();
+    setShowAuth(true);
+  };
+
+  // Load sync status
+  useEffect(() => {
+    if (isAuthenticated && isConfigured) {
+      getSyncStatusInfo().then(setSyncStatus);
+    }
+  }, [isAuthenticated, isConfigured]);
+
+  // Manual sync function - bidirectional sync
+  const handleManualSync = useCallback(async () => {
+    if (!isAuthenticated || !isConfigured) return;
+    
+    setIsSyncing(true);
+    try {
+      // Step 1: Push local todos to cloud first
+      const localTodosResult = await chrome.storage.local.get('todos');
+      const localTodos = (localTodosResult.todos || []).map((t: Record<string, unknown>) => ({
+        ...t,
+        createdAt: new Date(t.createdAt as string),
+        updatedAt: new Date(t.updatedAt as string),
+        deadline: t.deadline ? new Date(t.deadline as string) : undefined,
+        reminder: t.reminder ? new Date(t.reminder as string) : undefined,
+        completedAt: t.completedAt ? new Date(t.completedAt as string) : undefined,
+      })) as Todo[];
+      
+      if (localTodos.length > 0) {
+        console.log(`Pushing ${localTodos.length} todos to cloud...`);
+        const { error: pushError } = await syncTodosToCloud(localTodos);
+        if (pushError) {
+          console.error('Failed to push todos to cloud:', pushError);
+          alert(`同步失败: ${pushError.message}`);
+        } else {
+          console.log('Successfully pushed todos to cloud');
+        }
+      } else {
+        console.log('No local todos to sync');
+      }
+
+      // Step 2: Pull from cloud and merge
+      const { todos: cloudTodos, error: pullError } = await syncTodosFromCloud();
+      if (!pullError && cloudTodos.length >= 0) {
+        // Update local storage with merged data
+        const todosForStorage = cloudTodos.map(t => ({
+          ...t,
+          createdAt: t.createdAt.toISOString(),
+          updatedAt: t.updatedAt.toISOString(),
+          deadline: t.deadline?.toISOString(),
+          reminder: t.reminder?.toISOString(),
+          completedAt: t.completedAt?.toISOString(),
+        }));
+        await chrome.storage.local.set({ todos: todosForStorage });
+      } else if (pullError) {
+        console.error('Failed to pull todos from cloud:', pullError);
+      }
+
+      // Step 3: Sync knowledge items (similar process)
+      // Get local knowledge items from IndexedDB queue
+      const localKnowledgeResult = await chrome.storage.local.get('knowledge_queue');
+      const localKnowledge = (localKnowledgeResult.knowledge_queue || []).map(
+        (item: Record<string, unknown>) => ({
+          ...item,
+          createdAt: new Date(item.createdAt as string),
+          updatedAt: new Date(item.updatedAt as string),
+          publishedAt: item.publishedAt ? new Date(item.publishedAt as string) : undefined,
+        })
+      ) as KnowledgeItem[];
+
+      if (localKnowledge.length > 0) {
+        const { error: knowledgePushError } = await syncKnowledgeToCloud(localKnowledge);
+        if (knowledgePushError) {
+          console.error('Failed to push knowledge to cloud:', knowledgePushError);
+        }
+      }
+
+      const { items: cloudKnowledge, error: knowledgePullError } = await syncKnowledgeFromCloud();
+      if (knowledgePullError) {
+        console.error('Failed to pull knowledge from cloud:', knowledgePullError);
+      } else {
+        console.log(`Pulled ${cloudKnowledge.length} knowledge items from cloud`);
+      }
+      
+      // Refresh sync status
+      const status = await getSyncStatusInfo();
+      setSyncStatus(status);
+    } catch (error) {
+      console.error('Manual sync failed:', error);
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [isAuthenticated, isConfigured]);
+
+  // Show auth screen if needed
+  if (showAuth && isConfigured) {
+    return (
+      <div className="w-[400px] min-h-[500px] max-h-[600px] flex flex-col bg-white dark:bg-gray-900">
+        <header className="flex-shrink-0 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+          <h1 className="text-lg font-semibold text-gray-900 dark:text-white">
+            AI Assistant
+          </h1>
+        </header>
+        <main className="flex-1 overflow-y-auto p-4 scrollbar-thin">
+          <Auth onSuccess={handleAuthSuccess} />
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="w-[400px] min-h-[500px] max-h-[600px] flex flex-col bg-white dark:bg-gray-900">
       {/* Header */}
-      <header className="flex-shrink-0 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+      <header className="flex-shrink-0 px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
         <h1 className="text-lg font-semibold text-gray-900 dark:text-white">
           AI Assistant
         </h1>
+        <div className="flex items-center gap-2">
+          {/* Sync status indicator */}
+          {isAuthenticated && isConfigured && (
+            <button
+              onClick={handleManualSync}
+              disabled={isSyncing}
+              className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
+              title={syncStatus?.todos.pending || syncStatus?.knowledge.pending ? 'Sync pending' : 'Sync now'}
+            >
+              {isSyncing ? (
+                <RefreshCw className="w-4 h-4 text-gray-600 dark:text-gray-400 animate-spin" />
+              ) : syncStatus?.todos.lastSync || syncStatus?.knowledge.lastSync ? (
+                <Cloud className="w-4 h-4 text-green-600 dark:text-green-400" />
+              ) : (
+                <CloudOff className="w-4 h-4 text-gray-600 dark:text-gray-400" />
+              )}
+            </button>
+          )}
+          {isAuthenticated && (
+            <>
+              {user?.email && (
+                <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[120px]">
+                  {user.email}
+                </span>
+              )}
+              <button
+                onClick={handleSignOut}
+                className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                title="Sign out"
+              >
+                <LogOut className="w-4 h-4 text-gray-600 dark:text-gray-400" />
+              </button>
+            </>
+          )}
+          {isConfigured && !isAuthenticated && (
+            <button
+              onClick={() => setShowAuth(true)}
+              className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+              title="Sign in"
+            >
+              <User className="w-4 h-4 text-gray-600 dark:text-gray-400" />
+            </button>
+          )}
+        </div>
       </header>
 
       {/* Content */}
@@ -503,6 +685,7 @@ const KnowledgeView: React.FC = () => {
 const SettingsView: React.FC = () => {
   const { settings, setTheme, toggleNotifications, toggleAutoSummarize } = useSettings();
   const { config, updateConfig, updateProviderConfig, testConnection } = useAIConfig();
+  const { isAuthenticated, isConfigured, user, signOut } = useAuth();
 
   const handleExportData = async () => {
     try {
@@ -528,6 +711,35 @@ const SettingsView: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* Authentication */}
+      {isConfigured && (
+        <SettingsSection
+          title="Account"
+          description="Manage your account and sync settings"
+        >
+          {isAuthenticated ? (
+            <div className="space-y-3">
+              <SettingsRow label="Email" description={user?.email || 'Not available'}>
+                <span className="text-sm text-gray-600 dark:text-gray-400">
+                  {user?.email || 'Not available'}
+                </span>
+              </SettingsRow>
+              <Button variant="secondary" onClick={signOut} className="w-full">
+                <LogOut className="w-4 h-4 mr-2" />
+                Sign Out
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                Sign in to enable cloud sync across devices.
+              </p>
+              <Auth onSuccess={() => {}} />
+            </div>
+          )}
+        </SettingsSection>
+      )}
+
       {/* AI Configuration */}
       <SettingsSection
         title="AI Service"
