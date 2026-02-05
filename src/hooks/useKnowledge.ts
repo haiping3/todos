@@ -15,7 +15,8 @@ import {
   getKnowledgeTags,
   type KnowledgeData,
 } from '@/utils/indexeddb';
-import { syncKnowledgeToCloud, syncKnowledgeFromCloud } from '@/utils/sync';
+import { syncKnowledgeToCloud, syncKnowledgeFromCloud, syncKnowledgeDeleteFromCloud } from '@/utils/sync';
+import { generateEmbedding } from '@/utils/embeddings';
 import { useAuth } from './useAuth';
 
 /**
@@ -90,41 +91,42 @@ export function useKnowledge() {
       if (isAuthenticated && isConfigured) {
         try {
           const { items: cloudItems, error: syncError } = await syncKnowledgeFromCloud();
-          if (!syncError && cloudItems.length > 0) {
-            // Merge cloud items with local (cloud data takes precedence)
-            setItems(cloudItems);
-            
-            // Save merged items to IndexedDB
+          if (!syncError) {
+            // Merge with local by updatedAt (last-write-wins)
+            // Use strict > so local "ready" isn't overwritten by cloud "pending" with same timestamp
+            const mergedMap = new Map<string, KnowledgeItem>();
+            for (const item of localItems) mergedMap.set(item.id, item);
             for (const item of cloudItems) {
-              const existing = localItems.find((i) => i.id === item.id);
-              if (!existing || item.updatedAt >= existing.updatedAt) {
-                // Update or insert in IndexedDB
-                await saveKnowledge({
-                  id: item.id,
-                  url: item.url,
-                  title: item.title,
-                  content: item.content || '',
-                  summary: item.summary,
-                  keywords: item.keywords || [],
-                  tags: item.tags || [],
-                  category: item.category,
-                  source: item.source,
-                  author: item.author,
-                  publishedAt: item.publishedAt?.toISOString(),
-                  status: item.status,
-                  processingError: item.processingError,
-                  createdAt: item.createdAt.toISOString(),
-                  updatedAt: item.updatedAt.toISOString(),
-                });
-              }
+              const local = mergedMap.get(item.id);
+              if (!local || item.updatedAt > local.updatedAt) mergedMap.set(item.id, item);
+            }
+            const merged = Array.from(mergedMap.values());
+            setItems(merged);
+
+            for (const item of merged) {
+              await saveKnowledge({
+                id: item.id,
+                url: item.url,
+                title: item.title,
+                content: item.content || '',
+                summary: item.summary,
+                keywords: item.keywords || [],
+                tags: item.tags || [],
+                category: item.category,
+                source: item.source,
+                author: item.author,
+                publishedAt: item.publishedAt?.toISOString(),
+                status: item.status,
+                processingError: item.processingError,
+                createdAt: item.createdAt.toISOString(),
+                updatedAt: item.updatedAt.toISOString(),
+              });
             }
           } else if (syncError) {
             console.warn('Failed to sync knowledge from cloud:', syncError);
-            // Continue with local data if sync fails
           }
         } catch (syncErr) {
           console.warn('Error syncing knowledge from cloud:', syncErr);
-          // Continue with local data if sync fails
         }
       }
     } catch (error) {
@@ -166,18 +168,32 @@ export function useKnowledge() {
       await saveKnowledge(data);
 
       const newItem = dbToKnowledge(data);
-      setItems((prev) => [newItem, ...prev]);
+      
+      // Use functional update to get latest items and sync with new item
+      let latestItems: KnowledgeItem[] = [];
+      setItems((prev) => {
+        latestItems = [newItem, ...prev];
+        return latestItems;
+      });
 
-      // Sync to cloud if authenticated (fire and forget)
+      // Sync to cloud if authenticated
       if (isAuthenticated && isConfigured) {
-        syncKnowledgeToCloud([newItem, ...items]).catch((err) => {
+        // Use latestItems which includes the new item
+        syncKnowledgeToCloud(latestItems).catch((err) => {
           console.warn('Failed to sync knowledge to cloud:', err);
         });
+
+        // Generate embedding if content is available and status is ready
+        if (input.content && newItem.status === 'ready') {
+          generateEmbedding(newItem.id, input.content).catch((err) => {
+            console.warn('Failed to generate embedding:', err);
+          });
+        }
       }
 
       return newItem;
     },
-    [items, isAuthenticated, isConfigured]
+    [isAuthenticated, isConfigured]
   );
 
   // Update a knowledge item
@@ -186,7 +202,10 @@ export function useKnowledge() {
       id: string,
       updates: Partial<Omit<KnowledgeItem, 'id' | 'createdAt'>>
     ): Promise<void> => {
-      const dbUpdates: Partial<Omit<KnowledgeData, 'id' | 'createdAt'>> = {};
+      const now = new Date();
+      const dbUpdates: Partial<Omit<KnowledgeData, 'id' | 'createdAt'>> = {
+        updatedAt: now.toISOString(), // Always update timestamp
+      };
 
       if (updates.title !== undefined) dbUpdates.title = updates.title;
       if (updates.content !== undefined) dbUpdates.content = updates.content;
@@ -199,37 +218,68 @@ export function useKnowledge() {
 
       await updateKnowledgeDB(id, dbUpdates);
 
-      const updatedItems = items.map((item) =>
-        item.id === id
-          ? { ...item, ...updates, updatedAt: new Date() }
-          : item
-      );
-      setItems(updatedItems);
+      // Use functional update to get latest items (avoids stale closure)
+      let updatedItems: KnowledgeItem[] = [];
+      setItems((prev) => {
+        updatedItems = prev.map((item) =>
+          item.id === id
+            ? { ...item, ...updates, updatedAt: now }
+            : item
+        );
+        return updatedItems;
+      });
 
-      // Sync to cloud if authenticated (fire and forget)
       if (isAuthenticated && isConfigured) {
-        syncKnowledgeToCloud(updatedItems).catch((err) => {
-          console.warn('Failed to sync knowledge to cloud:', err);
-        });
+        // Why we await when status === 'ready' or 'processing': syncKnowledgeToCloud was previously fire-and-forget.
+        // The Supabase write is async; if we don't wait, processWithAI returns and the user can
+        // switch to Knowledge tab before the write completes. loadItems() then pulls from cloud,
+        // gets stale "processing", and overwrites local "ready". So we await so Supabase has the
+        // new status before the caller continues.
+        // We pass forceIds to ensure this specific item is synced even if updatedAt <= lastSync (same millisecond edge case).
+        if (updates.status === 'ready' || updates.status === 'processing') {
+          const { error } = await syncKnowledgeToCloud(updatedItems, [id]);
+          if (error) console.warn('Failed to sync knowledge to cloud:', error);
+        } else {
+          syncKnowledgeToCloud(updatedItems, [id]).catch((err) => {
+            console.warn('Failed to sync knowledge to cloud:', err);
+          });
+        }
+
+        // Generate embedding if status changed to ready and content is available
+        if (updates.status === 'ready') {
+          const updatedItem = updatedItems.find(item => item.id === id);
+          if (updatedItem && updatedItem.content) {
+            // Combine title, summary, and content for better embedding
+            const contentForEmbedding = [
+              updatedItem.title,
+              updatedItem.summary || '',
+              updatedItem.content,
+            ].filter(Boolean).join('\n\n');
+
+            generateEmbedding(id, contentForEmbedding).catch((err) => {
+              console.warn('Failed to generate embedding:', err);
+            });
+          }
+        }
       }
     },
-    [items, isAuthenticated, isConfigured]
+    [isAuthenticated, isConfigured]
   );
 
   // Delete a knowledge item
   const deleteItem = useCallback(async (id: string): Promise<void> => {
-    await deleteKnowledgeDB(id);
-    const updatedItems = items.filter((item) => item.id !== id);
-    setItems(updatedItems);
+    // Use functional update to avoid stale closure
+    setItems((prev) => prev.filter((item) => item.id !== id));
 
-    // Sync to cloud if authenticated (fire and forget)
-    // Note: We sync the updated list, which effectively deletes the item
+    await deleteKnowledgeDB(id);
+
+    // Delete from cloud so it does not reappear on next sync
     if (isAuthenticated && isConfigured) {
-      syncKnowledgeToCloud(updatedItems).catch((err) => {
-        console.warn('Failed to sync knowledge to cloud:', err);
+      syncKnowledgeDeleteFromCloud(id).catch((err) => {
+        console.warn('Failed to delete knowledge from cloud:', err);
       });
     }
-  }, [items, isAuthenticated, isConfigured]);
+  }, [isAuthenticated, isConfigured]);
 
   // Search knowledge items
   const search = useCallback(

@@ -26,13 +26,12 @@ export async function extractCurrentPageContent(): Promise<ExtractedContent | nu
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     
     if (!tab?.id || !tab.url) {
-      console.warn('No active tab found');
+      console.warn('[extractCurrentPageContent] No active tab found');
       return null;
     }
 
-    // Skip non-http pages
     if (!tab.url.startsWith('http')) {
-      console.warn('Cannot extract content from non-http page:', tab.url);
+      console.warn('[extractCurrentPageContent] Non-http page:', tab.url);
       return null;
     }
 
@@ -40,10 +39,11 @@ export async function extractCurrentPageContent(): Promise<ExtractedContent | nu
     const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_CONTENT' });
 
     if (!response) {
-      console.warn('No response from content script');
+      console.warn('[extractCurrentPageContent] No response from content script');
       return null;
     }
 
+    console.log('[extractCurrentPageContent] ok', { url: tab.url, title: response.title?.slice(0, 40), contentLen: response.content?.length });
     return {
       url: response.url || tab.url,
       title: response.title || tab.title || 'Untitled',
@@ -55,7 +55,11 @@ export async function extractCurrentPageContent(): Promise<ExtractedContent | nu
       favicon: tab.favIconUrl,
     };
   } catch (error) {
-    console.error('Failed to extract page content:', error);
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error('[extractCurrentPageContent] failed', err.message);
+    if (/Receiving end does not exist|Could not establish connection/i.test(err.message)) {
+      console.warn('[extractCurrentPageContent] Content script not loaded – refresh the page and try again');
+    }
     return null;
   }
 }

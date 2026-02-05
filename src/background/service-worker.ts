@@ -3,6 +3,97 @@
  * @author haiping.yu@zoom.us
  */
 
+import type { AutoSyncConfig } from '@/types';
+
+// ============================================================================
+// Auto Sync Configuration
+// ============================================================================
+
+const AUTO_SYNC_ALARM_NAME = 'auto-sync-periodic';
+const SYNC_DEBOUNCE_ALARM_NAME = 'auto-sync-debounce';
+const SETTINGS_KEY = 'app_settings';
+
+const DEFAULT_AUTO_SYNC_CONFIG: AutoSyncConfig = {
+  enabled: false,
+  intervalMinutes: 5,
+  debounceSeconds: 5,
+  syncOnNetworkRestore: true,
+};
+
+/**
+ * Get auto sync configuration from settings
+ */
+async function getAutoSyncConfig(): Promise<AutoSyncConfig> {
+  const result = await chrome.storage.local.get(SETTINGS_KEY);
+  const settings = result[SETTINGS_KEY];
+  return settings?.autoSync || DEFAULT_AUTO_SYNC_CONFIG;
+}
+
+/**
+ * Set up or update the periodic sync alarm
+ */
+async function setupPeriodicSyncAlarm(): Promise<void> {
+  const config = await getAutoSyncConfig();
+  
+  // Clear existing alarm
+  await chrome.alarms.clear(AUTO_SYNC_ALARM_NAME);
+  
+  if (config.enabled) {
+    // Create new alarm
+    chrome.alarms.create(AUTO_SYNC_ALARM_NAME, {
+      delayInMinutes: config.intervalMinutes,
+      periodInMinutes: config.intervalMinutes,
+    });
+    console.log(`[AutoSync] Periodic sync alarm set for every ${config.intervalMinutes} minutes`);
+  } else {
+    console.log('[AutoSync] Periodic sync alarm disabled');
+  }
+}
+
+/**
+ * Schedule a debounced sync after data change
+ */
+async function scheduleDebouncedSync(): Promise<void> {
+  const config = await getAutoSyncConfig();
+  
+  if (!config.enabled) {
+    return;
+  }
+  
+  // Clear existing debounce alarm and create new one
+  await chrome.alarms.clear(SYNC_DEBOUNCE_ALARM_NAME);
+  
+  // Convert seconds to minutes (minimum 0.1 minutes = 6 seconds)
+  const delayMinutes = Math.max(config.debounceSeconds / 60, 0.1);
+  
+  chrome.alarms.create(SYNC_DEBOUNCE_ALARM_NAME, {
+    delayInMinutes: delayMinutes,
+  });
+  
+  console.log(`[AutoSync] Debounced sync scheduled in ${config.debounceSeconds} seconds`);
+}
+
+/**
+ * Perform the actual sync operation
+ */
+async function performSync(): Promise<void> {
+  console.log('[AutoSync] Starting sync...');
+  
+  try {
+    // Dynamically import to avoid issues with service worker bundling
+    const { performAutoSync } = await import('@/utils/sync');
+    const result = await performAutoSync();
+    
+    if (result.success) {
+      console.log('[AutoSync] Sync completed successfully');
+    } else {
+      console.warn('[AutoSync] Sync failed:', result.error);
+    }
+  } catch (error) {
+    console.error('[AutoSync] Sync error:', error);
+  }
+}
+
 // Listen for extension installation
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install') {
@@ -19,11 +110,16 @@ chrome.runtime.onInstalled.addListener((details) => {
     // Re-create context menus on update
     setupContextMenus();
   }
+  
+  // Set up auto sync alarm
+  setupPeriodicSyncAlarm();
 });
 
 // Also set up context menus on startup (for development reloads)
 chrome.runtime.onStartup.addListener(() => {
   setupContextMenus();
+  // Set up auto sync alarm on startup
+  setupPeriodicSyncAlarm();
 });
 
 // Set up context menus
@@ -84,17 +180,113 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: true });
       return false;
 
+    // Auto Sync Messages
+    case 'NETWORK_ONLINE':
+      // Network came back online, trigger sync if enabled
+      handleNetworkOnline().then(sendResponse);
+      return true;
+
+    case 'TRIGGER_SYNC':
+      // Manual sync trigger
+      performSync().then(() => sendResponse({ success: true })).catch((err) => sendResponse({ success: false, error: String(err) }));
+      return true;
+
+    case 'UPDATE_AUTO_SYNC_CONFIG':
+      // Update auto sync configuration
+      setupPeriodicSyncAlarm().then(() => sendResponse({ success: true }));
+      return true;
+
+    case 'GET_AUTO_SYNC_STATE':
+      // Get current auto sync state
+      handleGetAutoSyncState().then(sendResponse);
+      return true;
+
     default:
       console.warn('Unknown message type:', message.type);
       sendResponse({ error: 'Unknown message type' });
   }
 });
 
-// Handle alarms for reminders
+// ============================================================================
+// Network Status Handler
+// ============================================================================
+
+/**
+ * Handle network coming back online
+ */
+async function handleNetworkOnline(): Promise<{ success: boolean; synced: boolean }> {
+  console.log('[AutoSync] Network online event received');
+  
+  const config = await getAutoSyncConfig();
+  
+  if (config.enabled && config.syncOnNetworkRestore) {
+    console.log('[AutoSync] Triggering sync on network restore');
+    await performSync();
+    return { success: true, synced: true };
+  }
+  
+  return { success: true, synced: false };
+}
+
+/**
+ * Get current auto sync state
+ */
+async function handleGetAutoSyncState(): Promise<unknown> {
+  try {
+    const { getAutoSyncState } = await import('@/utils/sync');
+    const state = await getAutoSyncState();
+    return { success: true, state };
+  } catch (error) {
+    return { success: false, error: String(error) };
+  }
+}
+
+// Handle alarms for reminders and auto sync
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name.startsWith('todo-reminder-')) {
     const todoId = alarm.name.replace('todo-reminder-', '');
     showTodoReminder(todoId);
+  } else if (alarm.name === AUTO_SYNC_ALARM_NAME) {
+    // Periodic sync alarm
+    console.log('[AutoSync] Periodic sync alarm triggered');
+    performSync();
+  } else if (alarm.name === SYNC_DEBOUNCE_ALARM_NAME) {
+    // Debounced sync after data change
+    console.log('[AutoSync] Debounced sync alarm triggered');
+    performSync();
+  }
+});
+
+// ============================================================================
+// Storage Change Listener for Auto Sync
+// ============================================================================
+
+// Keys that should trigger a sync when changed
+const SYNC_TRIGGER_KEYS = ['todos', 'knowledge_queue'];
+
+// Listen for storage changes to trigger debounced sync
+chrome.storage.onChanged.addListener(async (changes, areaName) => {
+  if (areaName !== 'local') return;
+  
+  // Check if settings changed (to update alarm)
+  if (changes[SETTINGS_KEY]) {
+    const newSettings = changes[SETTINGS_KEY].newValue;
+    if (newSettings?.autoSync) {
+      console.log('[AutoSync] Settings changed, updating alarm');
+      await setupPeriodicSyncAlarm();
+    }
+  }
+  
+  // Check if data changed (to trigger sync)
+  const changedKeys = Object.keys(changes);
+  const shouldSync = changedKeys.some((key) => SYNC_TRIGGER_KEYS.includes(key));
+  
+  if (shouldSync) {
+    const config = await getAutoSyncConfig();
+    if (config.enabled) {
+      console.log('[AutoSync] Data changed, scheduling debounced sync');
+      await scheduleDebouncedSync();
+    }
   }
 });
 
@@ -105,11 +297,24 @@ async function initializeSettings(): Promise<void> {
     aiProvider: 'openai',
     syncEnabled: false,
     notifications: true,
+    autoSummarize: true,
+    summaryThreshold: 80,
+    autoSync: DEFAULT_AUTO_SYNC_CONFIG,
+    reminderDefaults: {
+      beforeDeadline: 30,
+    },
   };
 
-  const existing = await chrome.storage.local.get('settings');
-  if (!existing.settings) {
-    await chrome.storage.local.set({ settings: defaultSettings });
+  const existing = await chrome.storage.local.get(SETTINGS_KEY);
+  if (!existing[SETTINGS_KEY]) {
+    await chrome.storage.local.set({ [SETTINGS_KEY]: defaultSettings });
+  } else {
+    // Ensure autoSync config exists (for upgrades)
+    const settings = existing[SETTINGS_KEY];
+    if (!settings.autoSync) {
+      settings.autoSync = DEFAULT_AUTO_SYNC_CONFIG;
+      await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
+    }
   }
 }
 

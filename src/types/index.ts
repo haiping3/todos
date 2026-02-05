@@ -133,12 +133,20 @@ export interface CustomAIConfig {
 // Settings Types
 export type ThemeMode = 'light' | 'dark' | 'system';
 
+export interface AutoSyncConfig {
+  enabled: boolean;
+  intervalMinutes: number; // Periodic sync interval (default: 5)
+  debounceSeconds: number; // Change debounce (default: 5)
+  syncOnNetworkRestore: boolean; // Sync when network comes back online
+}
+
 export interface AppSettings {
   theme: ThemeMode;
   notifications: boolean;
   autoSummarize: boolean;
   summaryThreshold: number;
   syncEnabled: boolean;
+  autoSync: AutoSyncConfig;
   reminderDefaults: {
     beforeDeadline: number; // minutes
   };

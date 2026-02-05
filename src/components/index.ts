@@ -35,3 +35,6 @@ export { AIAnalysisPanel } from './AIAnalysisPanel';
 export { Auth } from './Auth';
 export type { AuthProps } from './Auth';
 
+// Search components
+export { KnowledgeSearch, SimilarityBadge } from './KnowledgeSearch';
+

@@ -472,7 +472,8 @@ Return ONLY the category name, no explanation.`,
 
   try {
     const response = await chatCompletion(messages, { temperature: 0.3, maxTokens: 50 });
-    return response.replace(/['"]/g, '').trim();
+    if (typeof response !== 'string' || !response.trim()) return 'Other';
+    return response.replace(/['"]/g, '').trim() || 'Other';
   } catch (error) {
     console.error('Category suggestion failed:', error);
     return 'Other';

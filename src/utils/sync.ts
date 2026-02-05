@@ -144,7 +144,8 @@ function knowledgeFromDb(
 
 /**
  * Sync todos to cloud
- * Uses upsert to handle both new and existing todos
+ * Uses upsert to handle both new and existing todos.
+ * Incremental: only syncs items updated after lastSync when available.
  */
 export async function syncTodosToCloud(todos: Todo[]): Promise<{ error: Error | null }> {
   const client = await getSupabaseClient();
@@ -164,10 +165,18 @@ export async function syncTodosToCloud(todos: Todo[]): Promise<{ error: Error | 
       return { error: new Error('User not authenticated') };
     }
 
-    console.log(`Syncing ${todos.length} todos for user: ${user.id}`);
+    // Incremental sync: only push todos updated after lastSync
+    const status = await getSyncStatus();
+    const lastSync = status.todos.lastSync ? new Date(status.todos.lastSync).getTime() : 0;
+    const todosToPush =
+      lastSync > 0
+        ? todos.filter((t) => new Date(t.updatedAt).getTime() > lastSync)
+        : todos;
+
+    console.log(`Syncing ${todosToPush.length} todos (of ${todos.length}) for user: ${user.id}`);
 
     // Convert todos to database format
-    const todosToSync = todos.map((todo) => todoToDb(todo, user.id));
+    const todosToSync = todosToPush.map((todo) => todoToDb(todo, user.id));
     
     if (todosToSync.length === 0) {
       console.log('No todos to sync');
@@ -291,9 +300,12 @@ export async function syncTodosFromCloud(): Promise<{ todos: Todo[]; error: Erro
 
 /**
  * Sync knowledge items to cloud
+ * Incremental: only syncs items updated after lastSync when available.
+ * @param forceIds - Optional array of item IDs to force sync regardless of lastSync
  */
 export async function syncKnowledgeToCloud(
-  items: KnowledgeItem[]
+  items: KnowledgeItem[],
+  forceIds?: string[]
 ): Promise<{ error: Error | null }> {
   const client = await getSupabaseClient();
   if (!client) {
@@ -306,8 +318,22 @@ export async function syncKnowledgeToCloud(
       return { error: new Error('User not authenticated') };
     }
 
+    // Incremental sync: only push items updated after lastSync
+    // Use >= to include items updated in the same millisecond as lastSync
+    const status = await getSyncStatus();
+    const lastSync = status.knowledge.lastSync ? new Date(status.knowledge.lastSync).getTime() : 0;
+    const forceSet = new Set(forceIds || []);
+    const itemsToPush =
+      lastSync > 0
+        ? items.filter((i) => forceSet.has(i.id) || new Date(i.updatedAt).getTime() >= lastSync)
+        : items;
+
     // Convert to database format
-    const itemsToSync = items.map((item) => knowledgeToDb(item, user.id));
+    const itemsToSync = itemsToPush.map((item) => knowledgeToDb(item, user.id));
+
+    if (itemsToSync.length === 0) {
+      return { error: null };
+    }
 
     // Upsert knowledge items
     // Use type assertion to work around Supabase type inference issues
@@ -343,6 +369,40 @@ export async function syncKnowledgeToCloud(
     console.error('Sync knowledge to cloud exception:', error);
     return {
       error: error instanceof Error ? error : new Error('Failed to sync knowledge'),
+    };
+  }
+}
+
+/**
+ * Delete a knowledge item from cloud (so it does not reappear on next sync)
+ */
+export async function syncKnowledgeDeleteFromCloud(id: string): Promise<{ error: Error | null }> {
+  const client = await getSupabaseClient();
+  if (!client) {
+    return { error: new Error('Supabase not configured') };
+  }
+
+  try {
+    const { data: { user }, error: userError } = await client.auth.getUser();
+    if (userError || !user) {
+      return { error: new Error('User not authenticated') };
+    }
+
+    const { error } = await client
+      .from('knowledge_items')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', user.id);
+
+    if (error) {
+      console.error('Sync knowledge delete from cloud error:', error);
+      return { error: new Error(error.message) };
+    }
+    return { error: null };
+  } catch (error) {
+    console.error('Sync knowledge delete from cloud exception:', error);
+    return {
+      error: error instanceof Error ? error : new Error('Failed to delete knowledge from cloud'),
     };
   }
 }
@@ -440,4 +500,183 @@ export async function markSyncPending(type: 'todos' | 'knowledge'): Promise<void
   await updateSyncStatus({
     [type]: { ...current[type], pending: true },
   });
+}
+
+// ============================================================================
+// Auto Sync Functions
+// ============================================================================
+
+/**
+ * Auto sync state tracking
+ */
+const AUTO_SYNC_STATE_KEY = 'auto_sync_state';
+
+interface AutoSyncState {
+  lastAutoSync: string | null;
+  syncInProgress: boolean;
+  lastError: string | null;
+  pendingChanges: boolean;
+}
+
+/**
+ * Get auto sync state
+ */
+export async function getAutoSyncState(): Promise<AutoSyncState> {
+  const result = await chrome.storage.local.get(AUTO_SYNC_STATE_KEY);
+  return result[AUTO_SYNC_STATE_KEY] || {
+    lastAutoSync: null,
+    syncInProgress: false,
+    lastError: null,
+    pendingChanges: false,
+  };
+}
+
+/**
+ * Update auto sync state
+ */
+export async function updateAutoSyncState(updates: Partial<AutoSyncState>): Promise<void> {
+  const current = await getAutoSyncState();
+  await chrome.storage.local.set({
+    [AUTO_SYNC_STATE_KEY]: { ...current, ...updates },
+  });
+}
+
+/**
+ * Perform automatic bidirectional sync
+ * This function is called by the service worker for periodic and triggered syncs
+ * @returns Object with success status and any error message
+ */
+export async function performAutoSync(): Promise<{ success: boolean; error: string | null }> {
+  const log = (msg: string, ...args: unknown[]) => console.log('[AutoSync]', msg, ...args);
+
+  // Check if sync is already in progress
+  const state = await getAutoSyncState();
+  if (state.syncInProgress) {
+    log('Sync already in progress, skipping');
+    return { success: false, error: 'Sync already in progress' };
+  }
+
+  // Check if Supabase client is available
+  const client = await getSupabaseClient();
+  if (!client) {
+    log('Supabase not configured, skipping auto sync');
+    return { success: false, error: 'Supabase not configured' };
+  }
+
+  // Check if user is authenticated
+  const { data: { user }, error: userError } = await client.auth.getUser();
+  if (userError || !user) {
+    log('User not authenticated, skipping auto sync');
+    return { success: false, error: 'User not authenticated' };
+  }
+
+  // Mark sync as in progress
+  await updateAutoSyncState({ syncInProgress: true, lastError: null });
+
+  try {
+    log('Starting auto sync for user:', user.id);
+
+    // Step 1: Push local todos to cloud
+    const localTodosResult = await chrome.storage.local.get('todos');
+    const localTodos: Todo[] = (localTodosResult.todos || []).map((t: Record<string, unknown>) => ({
+      ...t,
+      createdAt: new Date(t.createdAt as string),
+      updatedAt: new Date(t.updatedAt as string),
+      deadline: t.deadline ? new Date(t.deadline as string) : undefined,
+      reminder: t.reminder ? new Date(t.reminder as string) : undefined,
+      completedAt: t.completedAt ? new Date(t.completedAt as string) : undefined,
+    }));
+
+    if (localTodos.length > 0) {
+      log(`Pushing ${localTodos.length} todos to cloud`);
+      const { error: todoPushError } = await syncTodosToCloud(localTodos);
+      if (todoPushError) {
+        log('Failed to push todos:', todoPushError.message);
+        // Continue with pull even if push fails
+      }
+    }
+
+    // Step 2: Pull todos from cloud and merge
+    log('Pulling todos from cloud');
+    const { todos: cloudTodos, error: todoPullError } = await syncTodosFromCloud();
+    if (todoPullError) {
+      log('Failed to pull todos:', todoPullError.message);
+    } else if (cloudTodos.length >= 0) {
+      const todosForStorage = cloudTodos.map((t) => ({
+        ...t,
+        createdAt: t.createdAt.toISOString(),
+        updatedAt: t.updatedAt.toISOString(),
+        deadline: t.deadline?.toISOString(),
+        reminder: t.reminder?.toISOString(),
+        completedAt: t.completedAt?.toISOString(),
+      }));
+      await chrome.storage.local.set({ todos: todosForStorage });
+      log(`Synced ${cloudTodos.length} todos from cloud`);
+    }
+
+    // Step 3: Push local knowledge items to cloud
+    const localKnowledgeResult = await chrome.storage.local.get('knowledge_queue');
+    const localKnowledge: KnowledgeItem[] = (localKnowledgeResult.knowledge_queue || []).map(
+      (item: Record<string, unknown>) => ({
+        ...item,
+        createdAt: new Date(item.createdAt as string),
+        updatedAt: new Date(item.updatedAt as string),
+        publishedAt: item.publishedAt ? new Date(item.publishedAt as string) : undefined,
+      })
+    );
+
+    if (localKnowledge.length > 0) {
+      log(`Pushing ${localKnowledge.length} knowledge items to cloud`);
+      const { error: knowledgePushError } = await syncKnowledgeToCloud(localKnowledge);
+      if (knowledgePushError) {
+        log('Failed to push knowledge:', knowledgePushError.message);
+      }
+    }
+
+    // Step 4: Pull knowledge items from cloud
+    log('Pulling knowledge from cloud');
+    const { items: cloudKnowledge, error: knowledgePullError } = await syncKnowledgeFromCloud();
+    if (knowledgePullError) {
+      log('Failed to pull knowledge:', knowledgePullError.message);
+    } else {
+      log(`Synced ${cloudKnowledge.length} knowledge items from cloud`);
+    }
+
+    // Update auto sync state
+    await updateAutoSyncState({
+      syncInProgress: false,
+      lastAutoSync: new Date().toISOString(),
+      lastError: null,
+      pendingChanges: false,
+    });
+
+    log('Auto sync completed successfully');
+    return { success: true, error: null };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    log('Auto sync failed:', errorMsg);
+
+    await updateAutoSyncState({
+      syncInProgress: false,
+      lastError: errorMsg,
+    });
+
+    return { success: false, error: errorMsg };
+  }
+}
+
+/**
+ * Mark that there are pending changes to sync
+ * Called when local data changes
+ */
+export async function markPendingChanges(): Promise<void> {
+  await updateAutoSyncState({ pendingChanges: true });
+}
+
+/**
+ * Check if there are pending changes
+ */
+export async function hasPendingChanges(): Promise<boolean> {
+  const state = await getAutoSyncState();
+  return state.pendingChanges;
 }
