@@ -31,3 +31,10 @@ export { KnowledgeDetail } from './KnowledgeDetail';
 // AI components
 export { AIAnalysisPanel } from './AIAnalysisPanel';
 
+// Auth components
+export { Auth } from './Auth';
+export type { AuthProps } from './Auth';
+
+// Search components
+export { KnowledgeSearch, SimilarityBadge } from './KnowledgeSearch';
+

@@ -5,6 +5,8 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import type { Todo, TodoStatus, TodoPriority } from '@/types';
+import { syncTodosToCloud, syncTodosFromCloud } from '@/utils/sync';
+import { useAuth } from './useAuth';
 
 const STORAGE_KEY = 'todos';
 
@@ -23,22 +25,45 @@ interface UseTodosResult {
 }
 
 /**
- * Hook for managing TODOs with Chrome Storage
+ * Hook for managing TODOs with Chrome Storage and cloud sync
  */
 export function useTodos(): UseTodosResult {
+  const { isAuthenticated, isConfigured } = useAuth();
   const [todos, setTodos] = useState<Todo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
-  // Load todos from storage
+  // Load todos from storage and sync from cloud if authenticated
   useEffect(() => {
     const loadTodos = async () => {
       try {
+        setIsLoading(true);
+        
+        // First load from local storage
         const result = await chrome.storage.local.get(STORAGE_KEY);
         const storedTodos = result[STORAGE_KEY] || [];
-        // Parse dates from JSON
         const parsedTodos = storedTodos.map(parseTodoFromStorage);
         setTodos(parsedTodos);
+
+        // If authenticated and Supabase is configured, sync from cloud
+        if (isAuthenticated && isConfigured) {
+          try {
+            const { todos: cloudTodos, error: syncError } = await syncTodosFromCloud();
+            if (!syncError && cloudTodos.length > 0) {
+              // Merge cloud todos with local (cloud data takes precedence)
+              setTodos(cloudTodos);
+              // Save merged todos to local storage
+              const todosForStorage = cloudTodos.map(prepareTodoForStorage);
+              await chrome.storage.local.set({ [STORAGE_KEY]: todosForStorage });
+            } else if (syncError) {
+              console.warn('Failed to sync todos from cloud:', syncError);
+              // Continue with local data if sync fails
+            }
+          } catch (syncErr) {
+            console.warn('Error syncing todos from cloud:', syncErr);
+            // Continue with local data if sync fails
+          }
+        }
       } catch (err) {
         setError(err instanceof Error ? err : new Error('Failed to load todos'));
       } finally {
@@ -47,7 +72,7 @@ export function useTodos(): UseTodosResult {
     };
 
     loadTodos();
-  }, []);
+  }, [isAuthenticated, isConfigured]);
 
   // Listen for storage changes
   useEffect(() => {
@@ -90,9 +115,16 @@ export function useTodos(): UseTodosResult {
         await setReminderAlarm(newTodo);
       }
 
+      // Sync to cloud if authenticated (fire and forget)
+      if (isAuthenticated && isConfigured) {
+        syncTodosToCloud(newTodos).catch((err) => {
+          console.warn('Failed to sync todos to cloud:', err);
+        });
+      }
+
       return newTodo;
     },
-    [todos, saveTodos]
+    [todos, saveTodos, isAuthenticated, isConfigured]
   );
 
   // Update a todo
@@ -110,8 +142,15 @@ export function useTodos(): UseTodosResult {
       if (updatedTodo && (updates.deadline || updates.reminder)) {
         await setReminderAlarm(updatedTodo);
       }
+
+      // Sync to cloud if authenticated (fire and forget)
+      if (isAuthenticated && isConfigured) {
+        syncTodosToCloud(newTodos).catch((err) => {
+          console.warn('Failed to sync todos to cloud:', err);
+        });
+      }
     },
-    [todos, saveTodos]
+    [todos, saveTodos, isAuthenticated, isConfigured]
   );
 
   // Delete a todo
@@ -122,8 +161,16 @@ export function useTodos(): UseTodosResult {
       
       // Clear reminder alarm
       await chrome.alarms.clear(`todo-reminder-${id}`);
+
+      // Sync to cloud if authenticated (fire and forget)
+      // Note: We sync the updated list, which effectively deletes the item
+      if (isAuthenticated && isConfigured) {
+        syncTodosToCloud(newTodos).catch((err) => {
+          console.warn('Failed to sync todos to cloud:', err);
+        });
+      }
     },
-    [todos, saveTodos]
+    [todos, saveTodos, isAuthenticated, isConfigured]
   );
 
   // Toggle todo status (pending -> completed -> pending)
@@ -149,8 +196,15 @@ export function useTodos(): UseTodosResult {
         .map((id) => todoMap.get(id))
         .filter((t): t is Todo => t !== undefined);
       await saveTodos(reorderedTodos);
+
+      // Sync to cloud if authenticated (fire and forget)
+      if (isAuthenticated && isConfigured) {
+        syncTodosToCloud(reorderedTodos).catch((err) => {
+          console.warn('Failed to sync todos to cloud:', err);
+        });
+      }
     },
-    [todos, saveTodos]
+    [todos, saveTodos, isAuthenticated, isConfigured]
   );
 
   // Get todo by ID

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Assistant - Dev Preview</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        max-width: 800px;
+        margin: 50px auto;
+        padding: 20px;
+        line-height: 1.6;
+      }
+      h1 { color: #333; }
+      .link {
+        display: inline-block;
+        margin: 10px 0;
+        padding: 10px 20px;
+        background: #007bff;
+        color: white;
+        text-decoration: none;
+        border-radius: 5px;
+      }
+      .link:hover { background: #0056b3; }
+      .note {
+        background: #f8f9fa;
+        padding: 15px;
+        border-left: 4px solid #007bff;
+        margin: 20px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>🚀 AI Assistant Chrome Extension</h1>
+    <p>Development server is running. Choose a page to preview:</p>
+    
+    <div>
+      <a href="/src/popup/index.html" class="link">📋 Popup Page</a>
+      <a href="/src/options/index.html" class="link">⚙️ Options Page</a>
+    </div>
+    
+    <div class="note">
+      <strong>Note:</strong> To actually use the extension in Chrome:
+      <ol>
+        <li>Run <code>pnpm build</code> to build the extension</li>
+        <li>Open Chrome and go to <code>chrome://extensions/</code></li>
+        <li>Enable "Developer mode"</li>
+        <li>Click "Load unpacked" and select the <code>dist</code> folder</li>
+      </ol>
+    </div>
+  </body>
+</html>

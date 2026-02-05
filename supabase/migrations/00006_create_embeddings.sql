@@ -110,7 +110,7 @@ returns table (
 )
 language sql
 security invoker
-set search_path = ''
+set search_path = public, extensions
 stable
 as $$
   select

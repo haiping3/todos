@@ -52,7 +52,11 @@ enabled = false
 port = 54327
 vector_port = 54328
 
+# Edge Functions: generate-embedding 在函数内用 Supabase JWKS 做 JWT 校验，
+# 需放行请求到 handler，故关闭平台侧 verify_jwt。
+[functions.generate-embedding]
+verify_jwt = false
+
 # AI/Vector configuration for pgvector
-[db.extensions]
-enabled = true
+# Note: Extensions are configured via migrations, not in config.toml
 

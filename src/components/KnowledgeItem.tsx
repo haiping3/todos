@@ -22,11 +22,22 @@ interface KnowledgeItemProps {
   item: KnowledgeItemType;
   onDelete: (id: string) => void;
   onOpen?: (item: KnowledgeItemType) => void;
+  /** Optional: mark as ready (for items stuck in Pending) */
+  onMarkReady?: (id: string) => void;
+  /** Optional similarity score from semantic search (0..1), shown as match % */
+  similarity?: number;
 }
 
 /**
  * Status indicator component
  */
+const STATUS_TITLE: Record<KnowledgeItemType['status'], string> = {
+  pending: 'Pending: waiting for AI summary/keywords/category, or not yet processed',
+  processing: 'Processing: AI is generating summary and keywords',
+  ready: 'Ready: processed and available for semantic search',
+  error: 'Error: processing failed (e.g. AI or embedding error)',
+};
+
 const StatusBadge: React.FC<{ status: KnowledgeItemType['status'] }> = ({ status }) => {
   const config = {
     pending: { icon: Clock, text: 'Pending', className: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' },
@@ -38,7 +49,10 @@ const StatusBadge: React.FC<{ status: KnowledgeItemType['status'] }> = ({ status
   const { icon: Icon, text, className } = config[status];
 
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${className}`}>
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${className}`}
+      title={STATUS_TITLE[status]}
+    >
       <Icon className={`w-3 h-3 ${status === 'processing' ? 'animate-spin' : ''}`} />
       {text}
     </span>
@@ -49,6 +63,8 @@ export const KnowledgeItem: React.FC<KnowledgeItemProps> = ({
   item,
   onDelete,
   onOpen,
+  onMarkReady,
+  similarity,
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -123,10 +139,34 @@ export const KnowledgeItem: React.FC<KnowledgeItemProps> = ({
         </div>
 
         {/* Status */}
-        <StatusBadge status={item.status} />
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          {similarity != null && (
+            <span
+              className={`px-2 py-0.5 rounded text-xs font-medium ${
+                similarity >= 0.8
+                  ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
+                  : similarity >= 0.6
+                  ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400'
+                  : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
+              }`}
+            >
+              {Math.round(similarity * 100)}% match
+            </span>
+          )}
+          <StatusBadge status={item.status} />
+        </div>
 
         {/* Actions */}
         <div className="flex items-center gap-1">
+          {item.status === 'pending' && onMarkReady && (
+            <button
+              onClick={() => onMarkReady(item.id)}
+              className="p-1 text-gray-400 hover:text-green-600 dark:hover:text-green-400"
+              title="Mark as ready (skip AI processing). Saves status, syncs to cloud, and generates embedding if signed in."
+            >
+              <Check className="w-4 h-4" />
+            </button>
+          )}
           {item.url && (
             <a
               href={item.url}

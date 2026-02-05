@@ -4,9 +4,16 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import type { AppSettings, ThemeMode } from '@/types';
+import type { AppSettings, ThemeMode, AutoSyncConfig } from '@/types';
 
 const SETTINGS_KEY = 'app_settings';
+
+const DEFAULT_AUTO_SYNC_CONFIG: AutoSyncConfig = {
+  enabled: false,
+  intervalMinutes: 5,
+  debounceSeconds: 5,
+  syncOnNetworkRestore: true,
+};
 
 const DEFAULT_SETTINGS: AppSettings = {
   theme: 'system',
@@ -14,6 +21,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   autoSummarize: true,
   summaryThreshold: 80,
   syncEnabled: false,
+  autoSync: DEFAULT_AUTO_SYNC_CONFIG,
   reminderDefaults: {
     beforeDeadline: 30, // 30 minutes
   },
@@ -28,6 +36,9 @@ interface UseSettingsResult {
   setTheme: (theme: ThemeMode) => Promise<void>;
   toggleNotifications: () => Promise<void>;
   toggleAutoSummarize: () => Promise<void>;
+  // Auto sync methods
+  toggleAutoSync: () => Promise<void>;
+  updateAutoSyncConfig: (config: Partial<AutoSyncConfig>) => Promise<void>;
 }
 
 /**
@@ -103,6 +114,30 @@ export function useSettings(): UseSettingsResult {
     await updateSettings({ autoSummarize: !settings.autoSummarize });
   }, [settings.autoSummarize, updateSettings]);
 
+  // Toggle auto sync on/off
+  const toggleAutoSync = useCallback(async () => {
+    const currentConfig = settings.autoSync || DEFAULT_AUTO_SYNC_CONFIG;
+    const newConfig = { ...currentConfig, enabled: !currentConfig.enabled };
+    await updateSettings({ autoSync: newConfig });
+    
+    // Notify service worker to update alarm
+    chrome.runtime.sendMessage({ type: 'UPDATE_AUTO_SYNC_CONFIG' }).catch(() => {
+      // Service worker may not be ready, that's okay
+    });
+  }, [settings.autoSync, updateSettings]);
+
+  // Update auto sync configuration
+  const updateAutoSyncConfig = useCallback(async (config: Partial<AutoSyncConfig>) => {
+    const currentConfig = settings.autoSync || DEFAULT_AUTO_SYNC_CONFIG;
+    const newConfig = { ...currentConfig, ...config };
+    await updateSettings({ autoSync: newConfig });
+    
+    // Notify service worker to update alarm
+    chrome.runtime.sendMessage({ type: 'UPDATE_AUTO_SYNC_CONFIG' }).catch(() => {
+      // Service worker may not be ready, that's okay
+    });
+  }, [settings.autoSync, updateSettings]);
+
   return {
     settings,
     isLoading,
@@ -112,6 +147,8 @@ export function useSettings(): UseSettingsResult {
     setTheme,
     toggleNotifications,
     toggleAutoSummarize,
+    toggleAutoSync,
+    updateAutoSyncConfig,
   };
 }
 

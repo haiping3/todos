@@ -10,7 +10,8 @@
     "alarms",
     "notifications",
     "activeTab",
-    "contextMenus"
+    "contextMenus",
+    "identity"
   ],
   
   "host_permissions": [

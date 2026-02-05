@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useCallback, useEffect } from 'react';
-import { ListTodo, BookOpen, Settings, Plus, Sparkles } from 'lucide-react';
+import { ListTodo, BookOpen, Settings, Plus, Sparkles, User, LogOut, Cloud, CloudOff, RefreshCw } from 'lucide-react';
 import { 
   TodoList, 
   TodoForm, 
@@ -19,6 +19,8 @@ import {
   KnowledgeDetail,
   QuickSaveButton,
   AIAnalysisPanel,
+  Auth,
+  KnowledgeSearch,
 } from '@/components';
 import type { TodoFormData } from '@/components';
 import { useTodos } from '@/hooks/useTodos';
@@ -26,6 +28,10 @@ import { usePendingAttachments } from '@/hooks/useAttachments';
 import { useSettings } from '@/hooks/useSettings';
 import { useAIConfig } from '@/hooks/useAIConfig';
 import { useKnowledge } from '@/hooks/useKnowledge';
+import { useAuth } from '@/hooks/useAuth';
+import { getSyncStatusInfo, syncTodosToCloud, syncTodosFromCloud, syncKnowledgeToCloud, syncKnowledgeFromCloud } from '@/utils/sync';
+import { generateEmbedding } from '@/utils/embeddings';
+import type { Todo, KnowledgeItem } from '@/types';
 import { deleteAttachmentsByTodo } from '@/utils/indexeddb';
 import { extractCurrentPageContent, getFaviconUrl } from '@/utils/content-extractor';
 import {
@@ -39,13 +45,17 @@ import {
   summarizeTodoList,
   suggestTodoCategories,
 } from '@/utils/ai';
-import type { Todo, KnowledgeItem } from '@/types';
 
 type Tab = 'todos' | 'knowledge' | 'settings';
 
 export const Popup: React.FC = () => {
+  const { isAuthenticated, isLoading: authLoading, isConfigured, user, signOut } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>('todos');
   const [quickAddMode, setQuickAddMode] = useState(false);
+  const [showAuth, setShowAuth] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<{ todos: { lastSync: string | null; pending: boolean }; knowledge: { lastSync: string | null; pending: boolean } } | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
 
   // Check for quick-add mode from URL params or storage
   useEffect(() => {
@@ -67,13 +77,219 @@ export const Popup: React.FC = () => {
     });
   }, []);
 
+  // Show auth if not configured or not authenticated (but allow skipping if not configured)
+  useEffect(() => {
+    if (!authLoading) {
+      if (!isConfigured) {
+        // Supabase not configured - allow using app without auth
+        setShowAuth(false);
+      } else if (!isAuthenticated) {
+        // Configured but not authenticated - show auth
+        setShowAuth(true);
+      } else {
+        // Authenticated - hide auth
+        setShowAuth(false);
+      }
+    }
+  }, [isAuthenticated, isConfigured, authLoading]);
+
+  const handleAuthSuccess = () => {
+    setShowAuth(false);
+  };
+
+  const handleSignOut = async () => {
+    await signOut();
+    setShowAuth(true);
+  };
+
+  // Load sync status
+  useEffect(() => {
+    if (isAuthenticated && isConfigured) {
+      getSyncStatusInfo().then(setSyncStatus);
+    }
+  }, [isAuthenticated, isConfigured]);
+
+  // Network online listener - notify service worker when network comes back
+  useEffect(() => {
+    const handleOnline = () => {
+      console.log('[Popup] Network online, notifying service worker');
+      chrome.runtime.sendMessage({ type: 'NETWORK_ONLINE' }).catch(() => {
+        // Service worker may not be ready
+      });
+    };
+
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, []);
+
+  // Manual sync function - bidirectional sync
+  const handleManualSync = useCallback(async () => {
+    if (!isAuthenticated || !isConfigured) return;
+    
+    setIsSyncing(true);
+    setSyncError(null);
+    try {
+      // Step 1: Push local todos to cloud first
+      const localTodosResult = await chrome.storage.local.get('todos');
+      const localTodos = (localTodosResult.todos || []).map((t: Record<string, unknown>) => ({
+        ...t,
+        createdAt: new Date(t.createdAt as string),
+        updatedAt: new Date(t.updatedAt as string),
+        deadline: t.deadline ? new Date(t.deadline as string) : undefined,
+        reminder: t.reminder ? new Date(t.reminder as string) : undefined,
+        completedAt: t.completedAt ? new Date(t.completedAt as string) : undefined,
+      })) as Todo[];
+      
+      if (localTodos.length > 0) {
+        console.log(`Pushing ${localTodos.length} todos to cloud...`);
+        const { error: pushError } = await syncTodosToCloud(localTodos);
+        if (pushError) {
+          console.error('Failed to push todos to cloud:', pushError);
+          setSyncError(pushError.message);
+          return;
+        } else {
+          console.log('Successfully pushed todos to cloud');
+        }
+      }
+
+      // Step 2: Pull from cloud and merge
+      const { todos: cloudTodos, error: pullError } = await syncTodosFromCloud();
+      if (pullError) {
+        console.error('Failed to pull todos from cloud:', pullError);
+        setSyncError(pullError.message);
+        return;
+      }
+      if (cloudTodos.length >= 0) {
+        const todosForStorage = cloudTodos.map(t => ({
+          ...t,
+          createdAt: t.createdAt.toISOString(),
+          updatedAt: t.updatedAt.toISOString(),
+          deadline: t.deadline?.toISOString(),
+          reminder: t.reminder?.toISOString(),
+          completedAt: t.completedAt?.toISOString(),
+        }));
+        await chrome.storage.local.set({ todos: todosForStorage });
+      }
+
+      // Step 3: Sync knowledge items (similar process)
+      const localKnowledgeResult = await chrome.storage.local.get('knowledge_queue');
+      const localKnowledge = (localKnowledgeResult.knowledge_queue || []).map(
+        (item: Record<string, unknown>) => ({
+          ...item,
+          createdAt: new Date(item.createdAt as string),
+          updatedAt: new Date(item.updatedAt as string),
+          publishedAt: item.publishedAt ? new Date(item.publishedAt as string) : undefined,
+        })
+      ) as KnowledgeItem[];
+
+      if (localKnowledge.length > 0) {
+        const { error: knowledgePushError } = await syncKnowledgeToCloud(localKnowledge);
+        if (knowledgePushError) {
+          console.error('Failed to push knowledge to cloud:', knowledgePushError);
+          setSyncError(knowledgePushError.message);
+          return;
+        }
+      }
+
+      const { error: knowledgePullError } = await syncKnowledgeFromCloud();
+      if (knowledgePullError) {
+        console.error('Failed to pull knowledge from cloud:', knowledgePullError);
+        setSyncError(knowledgePullError.message);
+        return;
+      }
+      
+      // Success: refresh sync status and clear error
+      const status = await getSyncStatusInfo();
+      setSyncStatus(status);
+      setSyncError(null);
+    } catch (error) {
+      console.error('Manual sync failed:', error);
+      setSyncError(error instanceof Error ? error.message : 'Sync failed');
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [isAuthenticated, isConfigured]);
+
+  // Show auth screen if needed
+  if (showAuth && isConfigured) {
+    return (
+      <div className="w-[400px] min-h-[500px] max-h-[600px] flex flex-col bg-white dark:bg-gray-900">
+        <header className="flex-shrink-0 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+          <h1 className="text-lg font-semibold text-gray-900 dark:text-white">
+            AI Assistant
+          </h1>
+        </header>
+        <main className="flex-1 overflow-y-auto p-4 scrollbar-thin">
+          <Auth onSuccess={handleAuthSuccess} />
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="w-[400px] min-h-[500px] max-h-[600px] flex flex-col bg-white dark:bg-gray-900">
       {/* Header */}
-      <header className="flex-shrink-0 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+      <header className="flex-shrink-0 px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
         <h1 className="text-lg font-semibold text-gray-900 dark:text-white">
           AI Assistant
         </h1>
+        <div className="flex items-center gap-2">
+          {/* Sync status indicator: 同步中 / 已同步 / 同步失败 */}
+          {isAuthenticated && isConfigured && (
+            <div className="flex items-center gap-1.5" title={syncError ?? (syncStatus?.todos.pending || syncStatus?.knowledge.pending ? 'Sync pending' : 'Sync now')}>
+              {isSyncing && (
+                <span className="text-xs text-gray-500 dark:text-gray-400">同步中</span>
+              )}
+              {!isSyncing && syncError && (
+                <span className="text-xs text-red-600 dark:text-red-400">同步失败</span>
+              )}
+              {!isSyncing && !syncError && (syncStatus?.todos.lastSync || syncStatus?.knowledge.lastSync) && (
+                <span className="text-xs text-green-600 dark:text-green-400">已同步</span>
+              )}
+              <button
+                onClick={handleManualSync}
+                disabled={isSyncing}
+                className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
+                aria-label={isSyncing ? '同步中' : syncError ? '同步失败' : 'Sync now'}
+              >
+                {isSyncing ? (
+                  <RefreshCw className="w-4 h-4 text-gray-600 dark:text-gray-400 animate-spin" />
+                ) : syncError ? (
+                  <CloudOff className="w-4 h-4 text-red-600 dark:text-red-400" />
+                ) : syncStatus?.todos.lastSync || syncStatus?.knowledge.lastSync ? (
+                  <Cloud className="w-4 h-4 text-green-600 dark:text-green-400" />
+                ) : (
+                  <CloudOff className="w-4 h-4 text-gray-600 dark:text-gray-400" />
+                )}
+              </button>
+            </div>
+          )}
+          {isAuthenticated && (
+            <>
+              {user?.email && (
+                <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[120px]">
+                  {user.email}
+                </span>
+              )}
+              <button
+                onClick={handleSignOut}
+                className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                title="Sign out"
+              >
+                <LogOut className="w-4 h-4 text-gray-600 dark:text-gray-400" />
+              </button>
+            </>
+          )}
+          {isConfigured && !isAuthenticated && (
+            <button
+              onClick={() => setShowAuth(true)}
+              className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+              title="Sign in"
+            >
+              <User className="w-4 h-4 text-gray-600 dark:text-gray-400" />
+            </button>
+          )}
+        </div>
       </header>
 
       {/* Content */}
@@ -326,38 +542,59 @@ const KnowledgeView: React.FC = () => {
     deleteItem,
     updateStatus,
   } = useKnowledge();
+  const { isAuthenticated, isConfigured } = useAuth();
 
   const [showForm, setShowForm] = useState(false);
   const [selectedItem, setSelectedItem] = useState<KnowledgeItem | null>(null);
   const [isSavingPage, setIsSavingPage] = useState(false);
+  const [savePageError, setSavePageError] = useState<string | null>(null);
+  const [displayedItems, setDisplayedItems] = useState<KnowledgeItem[]>(items);
+  const [similarityScores, setSimilarityScores] = useState<Map<string, number>>(new Map());
+  const [searchQuery, setSearchQuery] = useState('');
 
-  // Process a knowledge item with AI
+  // When not searching, list uses items so Save current page shows new item immediately
+  // Force re-compute when items changes to ensure list updates
+  const listItems = searchQuery.trim() ? displayedItems : items;
+
+  // Keep displayedItems in sync with items when search is cleared
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setDisplayedItems(items);
+    }
+  }, [items, searchQuery]);
+
+  // Process a knowledge item with AI (plugin-only: uses utils/ai or local fallbacks; Supabase only for sync/embedding later)
   const processWithAI = useCallback(
     async (id: string, content: string, title: string) => {
+      const log = (msg: string, ...args: unknown[]) =>
+        console.log('[processWithAI]', id.slice(0, 8), msg, ...args);
       try {
+        log('start, setting processing');
         await updateStatus(id, 'processing');
 
         const aiConfigured = await isAIConfigured();
-        
+        log('isAIConfigured:', aiConfigured);
+
         let summary: string;
         let keywords: string[];
         let category: string;
 
         if (aiConfigured) {
-          // Use AI for processing
+          log('using AI for summary/keywords/category');
           [summary, keywords, category] = await Promise.all([
             generateArticleSummary(content),
             extractKeywords(content),
             suggestArticleCategory(title),
           ]);
+          log('AI done', { summaryLen: summary?.length, keywordsCount: keywords?.length });
         } else {
-          // Use local fallbacks
+          log('using local fallbacks');
           summary = localArticleSummary(content);
           keywords = localExtractKeywords(content);
           category = 'Other';
         }
 
-        // Update the item with processed data
+        log('sending UPDATE_KNOWLEDGE to background');
         await chrome.runtime.sendMessage({
           type: 'UPDATE_KNOWLEDGE',
           payload: {
@@ -369,25 +606,46 @@ const KnowledgeView: React.FC = () => {
           },
         });
 
+        log('setting status ready');
         await updateStatus(id, 'ready');
+
+        if (isAuthenticated && isConfigured) {
+          const contentForEmbedding = [title, summary, content].filter(Boolean).join('\n\n');
+          generateEmbedding(id, contentForEmbedding).catch((err) => {
+            console.warn('[processWithAI] embedding failed (item stays Ready; 404 = Edge Function not deployed)', id.slice(0, 8), err);
+          });
+        }
+        log('done');
       } catch (error) {
-        console.error('AI processing failed:', error);
+        console.error('[processWithAI] failed', id.slice(0, 8), error);
         const errorMessage = error instanceof Error ? error.message : 'Processing failed';
         await updateStatus(id, 'error', errorMessage);
       }
     },
-    [updateStatus]
+    [updateStatus, isAuthenticated, isConfigured]
   );
 
   // Save current page
   const handleSaveCurrentPage = useCallback(async () => {
+    const log = (msg: string, ...args: unknown[]) => console.log('[SaveCurrentPage]', msg, ...args);
     setIsSavingPage(true);
+    setSavePageError(null);
+    
+    // Clear search immediately so new item shows in list
+    // This must happen before addItem so listItems uses items directly
+    setSearchQuery('');
+    
     try {
+      log('extracting content');
       const pageContent = await extractCurrentPageContent();
-      
+
       if (!pageContent) {
-        throw new Error('Could not extract page content');
+        const msg = '无法获取当前页面内容，请确保当前标签页为普通网页并刷新后再试';
+        setSavePageError(msg);
+        log('extract failed, no content');
+        throw new Error(msg);
       }
+      log('extract ok', { title: pageContent.title?.slice(0, 30), contentLen: pageContent.content?.length });
 
       const newItem = await addItem({
         url: pageContent.url,
@@ -397,17 +655,24 @@ const KnowledgeView: React.FC = () => {
         author: pageContent.author,
         favicon: pageContent.favicon || getFaviconUrl(pageContent.url),
       });
+      log('addItem ok', newItem.id);
 
-      // Process with AI in background
-      if (pageContent.content) {
-        processWithAI(newItem.id, pageContent.content, pageContent.title);
+      if (pageContent.content && pageContent.content.trim()) {
+        // Await processWithAI to ensure status updates are synced to cloud
+        await processWithAI(newItem.id, pageContent.content, pageContent.title);
+      } else {
+        await updateStatus(newItem.id, 'ready');
       }
     } catch (error) {
-      console.error('Failed to save current page:', error);
+      console.error('[SaveCurrentPage] failed', error);
+      const msg = error instanceof Error ? error.message : String(error);
+      const isCodeLike = /extends Error|class \w|=>|function\s*\(|\.\.\.\w\)/.test(msg) || msg.length > 200;
+      setSavePageError(isCodeLike ? '保存失败，请稍后重试' : msg.slice(0, 120));
+      throw error;
     } finally {
       setIsSavingPage(false);
     }
-  }, [addItem, processWithAI]);
+  }, [addItem, processWithAI, updateStatus]);
 
   // Handle form submission
   const handleFormSubmit = useCallback(
@@ -474,35 +739,67 @@ const KnowledgeView: React.FC = () => {
   return (
     <div className="space-y-4">
       {/* Quick actions */}
-      <div className="flex gap-2">
-        <QuickSaveButton
-          onSave={handleSaveCurrentPage}
-          isLoading={isSavingPage}
-        />
-        <Button
-          variant="secondary"
-          onClick={() => setShowForm(true)}
-          className="px-3"
-        >
-          <Plus className="w-4 h-4" />
-        </Button>
+      <div className="space-y-2">
+        <div className="flex gap-2">
+          <QuickSaveButton
+            onSave={handleSaveCurrentPage}
+            isLoading={isSavingPage}
+          />
+          <Button
+            variant="secondary"
+            onClick={() => setShowForm(true)}
+            className="px-3"
+          >
+            <Plus className="w-4 h-4" />
+          </Button>
+        </div>
+        {savePageError && (
+          <p className="text-sm text-red-600 dark:text-red-400" role="alert">
+            {savePageError}
+          </p>
+        )}
       </div>
 
-      {/* Knowledge list */}
-      <KnowledgeList
+      {/* Search component - controlled mode to allow clearing search after save */}
+      <KnowledgeSearch
         items={items}
+        onResultsChange={setDisplayedItems}
+        onSimilarityScoresChange={setSimilarityScores}
+        onQueryChange={setSearchQuery}
+        query={searchQuery}
+        onSearchTypeChange={() => {}}
+        isAuthenticated={isAuthenticated}
+        isSupabaseConfigured={isConfigured}
+      />
+
+      {/* Knowledge list: items when no search (instant after Save), displayedItems when searching */}
+      <KnowledgeList
+        items={listItems}
         isLoading={isLoading}
         categories={categories}
-        onDelete={deleteItem}
+        onDelete={(id) => {
+          if (searchQuery.trim()) setDisplayedItems((prev) => prev.filter((i) => i.id !== id));
+          deleteItem(id);
+        }}
         onOpen={setSelectedItem}
+        onMarkReady={(id) => {
+          if (searchQuery.trim()) {
+            setDisplayedItems((prev) =>
+              prev.map((i) => (i.id === id ? { ...i, status: 'ready' as const } : i))
+            );
+          }
+          updateStatus(id, 'ready');
+        }}
+        similarityScores={similarityScores}
       />
     </div>
   );
 };
 
 const SettingsView: React.FC = () => {
-  const { settings, setTheme, toggleNotifications, toggleAutoSummarize } = useSettings();
+  const { settings, setTheme, toggleNotifications, toggleAutoSummarize, toggleAutoSync, updateAutoSyncConfig } = useSettings();
   const { config, updateConfig, updateProviderConfig, testConnection } = useAIConfig();
+  const { isAuthenticated, isConfigured, user, signOut } = useAuth();
 
   const handleExportData = async () => {
     try {
@@ -528,6 +825,35 @@ const SettingsView: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* Authentication */}
+      {isConfigured && (
+        <SettingsSection
+          title="Account"
+          description="Manage your account and sync settings"
+        >
+          {isAuthenticated ? (
+            <div className="space-y-3">
+              <SettingsRow label="Email" description={user?.email || 'Not available'}>
+                <span className="text-sm text-gray-600 dark:text-gray-400">
+                  {user?.email || 'Not available'}
+                </span>
+              </SettingsRow>
+              <Button variant="secondary" onClick={signOut} className="w-full">
+                <LogOut className="w-4 h-4 mr-2" />
+                Sign Out
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                Sign in to enable cloud sync across devices.
+              </p>
+              <Auth onSuccess={() => {}} />
+            </div>
+          )}
+        </SettingsSection>
+      )}
+
       {/* AI Configuration */}
       <SettingsSection
         title="AI Service"
@@ -569,6 +895,53 @@ const SettingsView: React.FC = () => {
           />
         </SettingsRow>
       </SettingsSection>
+
+      {/* Auto Sync - Only show when authenticated */}
+      {isAuthenticated && isConfigured && (
+        <SettingsSection
+          title="Auto Sync"
+          description="Automatically sync data with cloud"
+        >
+          <SettingsRow
+            label="Enable Auto Sync"
+            description="Automatically sync when data changes"
+          >
+            <ToggleSwitch
+              checked={settings.autoSync?.enabled ?? false}
+              onChange={toggleAutoSync}
+            />
+          </SettingsRow>
+          {settings.autoSync?.enabled && (
+            <>
+              <SettingsRow
+                label="Sync Interval"
+                description="How often to sync with cloud"
+              >
+                <select
+                  value={settings.autoSync?.intervalMinutes ?? 5}
+                  onChange={(e) => updateAutoSyncConfig({ intervalMinutes: Number(e.target.value) })}
+                  className="px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+                >
+                  <option value={1}>1 min</option>
+                  <option value={5}>5 min</option>
+                  <option value={10}>10 min</option>
+                  <option value={15}>15 min</option>
+                  <option value={30}>30 min</option>
+                </select>
+              </SettingsRow>
+              <SettingsRow
+                label="Sync on Network Restore"
+                description="Sync immediately when network comes back"
+              >
+                <ToggleSwitch
+                  checked={settings.autoSync?.syncOnNetworkRestore ?? true}
+                  onChange={() => updateAutoSyncConfig({ syncOnNetworkRestore: !settings.autoSync?.syncOnNetworkRestore })}
+                />
+              </SettingsRow>
+            </>
+          )}
+        </SettingsSection>
+      )}
 
       {/* Data Management */}
       <SettingsSection title="Data">

@@ -14,6 +14,10 @@ interface KnowledgeListProps {
   categories: string[];
   onDelete: (id: string) => void;
   onOpen?: (item: KnowledgeItemType) => void;
+  /** Optional: mark item as ready (for items stuck in Pending) */
+  onMarkReady?: (id: string) => void;
+  /** Optional similarity scores from semantic search (itemId -> 0..1) */
+  similarityScores?: Map<string, number>;
 }
 
 type FilterStatus = 'all' | KnowledgeStatus;
@@ -24,6 +28,8 @@ export const KnowledgeList: React.FC<KnowledgeListProps> = ({
   categories,
   onDelete,
   onOpen,
+  onMarkReady,
+  similarityScores,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<FilterStatus>('all');
@@ -196,6 +202,8 @@ export const KnowledgeList: React.FC<KnowledgeListProps> = ({
             item={item}
             onDelete={onDelete}
             onOpen={onOpen}
+            onMarkReady={onMarkReady}
+            similarity={similarityScores?.get(item.id)}
           />
         ))}
       </div>

@@ -106,7 +106,7 @@ chromeplugin/
 ### Option 1: Supabase Cloud
 
 1. Create a project at [supabase.com](https://supabase.com)
-2. Run the migrations in `supabase/migrations/` folder
+2. Run the migrations: ensure the project is linked (e.g. `supabase link --project-ref <your-ref>`), run `supabase login` if needed, then `pnpm run db:push` to apply all migrations in `supabase/migrations/`.
 3. Set environment variables:
 
 ```bash
@@ -129,6 +129,34 @@ supabase db push
 # Stop when done
 supabase stop
 ```
+
+### Deploy Edge Function `generate-embedding`
+
+The Knowledge semantic search uses an Edge Function with **Supabase built-in gte-small** (no OpenAI or other external API). A **404** on `/functions/v1/generate-embedding` means it is not deployed yet.
+
+1. **Login and link** (one-time):
+
+   ```bash
+   supabase login
+   supabase link --project-ref YOUR_PROJECT_REF   # project id is in .supabase/config.toml (e.g. smcpizabepxxsydyqfwk)
+   ```
+
+2. **Apply migration** (switches embeddings to 384-dim gte-small):
+
+   ```bash
+   pnpm run db:push
+   ```
+   Or `supabase db push` if you use the CLI directly.
+
+3. **Deploy the function** (no secrets required for gte-small):
+
+   ```bash
+   supabase functions deploy generate-embedding
+   ```
+
+   校验在函数内完成：使用 Supabase JWKS（`/auth/v1/.well-known/jwks.json`）对 `Authorization: Bearer <access_token>` 做 JWT 校验，再通过 `getUser()` 取身份。`config.toml` 里 `verify_jwt = false` 仅用于让请求先到达 handler，避免平台侧与 JWKS 不一致导致 401。若部署后仍 401，可尝试带 `--no-verify-jwt` 再部署一次。
+
+4. **Verify**: `https://<project-ref>.supabase.co/functions/v1/generate-embedding` should respond (e.g. 400 for missing body when unauthenticated, or 401 when token is missing/invalid; 404 means not deployed).
 
 ## Configuration
 

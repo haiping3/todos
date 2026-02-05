@@ -12,4 +12,6 @@ export { useSettings, DEFAULT_SETTINGS, getEffectiveTheme } from './useSettings'
 export { useAIConfig, AI_PROVIDERS, DEFAULT_AI_CONFIG } from './useAIConfig';
 export { useKnowledge, usePendingKnowledge } from './useKnowledge';
 export type { AddKnowledgeInput } from './useKnowledge';
+export { useAuth } from './useAuth';
+export type { AuthState, UseAuthResult } from './useAuth';
 
